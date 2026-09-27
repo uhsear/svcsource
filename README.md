@@ -194,7 +194,8 @@ PASS  a portal url with no scheme is a usage error too  <-- pinned defect
 ...
 PASS  the command line reports the copied locator, exits 3 and does not say PASS  <-- pinned defect
 PASS  and prints the counts the README quotes for this site  <-- pinned defect
-...
+PASS  and the copied and referenced locators reach the file
+PASS  and the referenced locator's note names the manifest entry, as the README row quotes it  <-- pinned defect
 PASS  over a real socket the run reads the whole site and exits 1 for the locator only a registered folder vouches for  <-- pinned defect
 PASS  and still reports the copied locator
 PASS  the password travels in the POST body, never in a url
@@ -208,7 +209,7 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-485 assertions, 0 failed
+486 assertions, 0 failed
 ```
 
 The count is the same on Windows (Python 3.13 and 3.9) and Linux (Python 3.12), and every run
@@ -306,7 +307,7 @@ server,instance,database,db_user,version,capabilities,extensions,source_document
 
 The summary on the screen is the part you read first. This is a real run against a synthetic site
 served on `127.0.0.1`. The site has one feature service, one geometry service and two geocode
-services:
+services. The Streets manifest lists its locator folder with `byReference` true:
 
 ```
 services: 4
@@ -333,7 +334,7 @@ These are the two geocode rows the same run wrote with `--apply`:
 
 ```
 Locators,Address,GeocodeServer,Locators/Address.GeocodeServer,copied,,,false,Address,,,C:\arcgisserver\directories\arcgissystem\arcgisinput\Locators\Address.GeocodeServer\extracted\p30,,,,,C:\desk\Address.loc,"locator copied to the server at publish time: it is in the server's arcgisinput directory, so rebuilding the source locator does not update this service. Overwrite the service."
-Locators,Streets,GeocodeServer,Locators/Streets.GeocodeServer,ok,,,true,Streets,,,\\fileserver\locators\streets,,,,,C:\desk\Streets.loc,locator read in place from registered folder \\fileserver\locators
+Locators,Streets,GeocodeServer,Locators/Streets.GeocodeServer,ok,,,true,Streets,,,\\fileserver\locators\streets,,,,,C:\desk\Streets.loc,locator read in place: the manifest entry for its folder says byReference true
 ```
 
 When the site refuses the registered-folder search, the run says it cannot tell, and exits 1. The
@@ -350,8 +351,8 @@ Read only. services_inventory.csv was not written. Re-run with --apply.
 FAIL: at least one data source could not be read. The inventory is incomplete.
 ```
 
-`copied` is the line that changes a migration plan. A service published with its data copied to
-the server does not read your enterprise geodatabase at all. It reads a copy inside the server's
+For a geodatabase, `data copied to the server` is the line that changes a migration plan. A
+service published with its data copied to the server does not read your enterprise geodatabase at all. It reads a copy inside the server's
 own managed database, and moving the geodatabase it was copied from does nothing to it, in either
 direction. The permissions page will not tell you that and the service url does not hint at it.
 
@@ -382,7 +383,7 @@ The rules apply in this order, and the first one that matches decides:
 | `locatorWorkspacePath` is below `arcgisinput` and then `extracted` | `false` | `copied` |
 | A manifest `databases` entry names the locator folder and has a flag | the manifest's own flag | `ok` or `copied` |
 | The registered folders could not be read | blank, the note says UNKNOWN | `unresolved` |
-| `locatorWorkspacePath` is inside a folder the user registered | `true` | `ok` |
+| `locatorWorkspacePath` is inside a folder the user registered | blank, the note says UNKNOWN | `unresolved` |
 | The path is only inside a folder that ArcGIS Server manages itself | blank, the note says UNKNOWN | `unresolved` |
 | The path is inside no registered folder | blank, the note says UNKNOWN | `unresolved` |
 
@@ -512,7 +513,8 @@ somebody ran an inventory.
   many locators read UNKNOWN, compare their paths with the data stores by hand.
 - The `arcgisinput` rule rests on Esri's documented example path for copied data, which is a
   geoprocessing service. No Esri page states the path for a copied locator. A site that stores
-  its copies somewhere else reads UNKNOWN, or `ok` if that place is inside a registered folder.
+  its copies somewhere else reads UNKNOWN. A path spelled with the `${arcgisinput}` variable
+  instead of the real directory is not matched either, and reads UNKNOWN.
 - A composite locator is always copied, by Esri's design. Its participating locators can still be
   in a registered folder, and Esri's procedure for those is to rebuild them while the service is
   stopped. The tool does not read the participants. For a composite, a `copied` row does not prove
@@ -522,7 +524,7 @@ somebody ran an inventory.
 - The registered-folder search needs an account that may read the site's data items. When the
   site refuses the search, every geocode service that the search would settle reads UNKNOWN and
   the run exits 1. A locator under `arcgisinput` still reads `copied`.
-- The locator field names come from Esri's documentation. They have not yet been checked against
+- The locator field names come from Esri's documentation. They have not been checked against
   the service JSON and manifest of a live site. The self-test runs against synthetic services
   built from that documentation, and no real geocode manifest was available.
 - The manifest is what the server recorded at publish time. A service republished by hand against
@@ -549,6 +551,8 @@ somebody ran an inventory.
   `generateToken`, `admin/services`, the service manifest, `admin/data/findItems` and
   `sharing/rest/search`.
 - A long locator path pushes the data source summary out of its columns. The CSV is not affected.
+- On Windows, the password prompt waits at the console. A scheduled job must set
+  `SVCSOURCE_PASSWORD`, or the run waits for a password that nobody types.
 - `--insecure` skips certificate verification and exists for sites behind an internal CA. It is
   off by default. Add the CA to your trust store instead.
 
