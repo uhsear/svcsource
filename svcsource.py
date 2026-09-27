@@ -3515,6 +3515,10 @@ def self_test():
           and geo_back["Address"]["database"] == COPY_DIR
           and geo_back["Streets"]["by_reference"] == "true",
           "and the copied and referenced locators reach the file")
+    check(geo_back["Streets"]["note"] == "locator read in place: the "
+          "manifest entry for its folder says byReference true",
+          "and the referenced locator's note names the manifest entry, as "
+          "the README row quotes it  <-- pinned defect")
 
     # ---- the same command line against a real HTTP server on 127.0.0.1.
     # Everything above swaps _opener for a stand-in. This drives the real
