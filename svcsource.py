@@ -43,10 +43,18 @@ after cutover, and hand to somebody who does not have Pro.
         --portal https://portal.example.com/portal/sharing/rest \
         --public-rest-root https://gis.example.com/server/rest/services
 
+Three read-only extras ride on the same walk. --locator PATH answers the
+reverse question a rebuild job asks: which services read this locator, which
+serve a copy of it, and which composites may use it. --recycle-with flags
+services on one geodatabase that recycle in the same minute, on this site or
+across the inventories of other sites. --aprx-dir pairs each service with its
+.aprx and refuses, as AMBIGUOUS, when two projects match.
+
 The password comes from SVCSOURCE_PASSWORD or an unechoed prompt, never from
 argv. Exit codes: 0 every service resolved, 1 at least one data source could
 not be read, 2 the site could not be read, 3 every source was read and at least
-one geocode service serves a copied locator, 64 usage error.
+one geocode service serves a copied locator, 4 every source was read and
+--aprx-dir found a service that matches two or more projects, 64 usage error.
 """
 
 from __future__ import print_function
@@ -93,6 +101,12 @@ HTTP_TIMEOUT = 30
 # so this is a loop guard rather than a depth limit.
 MAX_FOLDERS = 512
 
+# Services reading one geodatabase that recycle in the same minute, on one
+# site, before the recycle skew line names them. Two sites recycling against
+# one geodatabase in the same minute are named at any count. A heuristic: no
+# measurement supports this exact number, so tune it to your database.
+RECYCLE_CROWD = 20
+
 # Environment variables the two passwords may come from.
 SECRET_ENV = "SVCSOURCE_PASSWORD"
 PORTAL_SECRET_ENV = "SVCSOURCE_PORTAL_PASSWORD"
@@ -114,6 +128,19 @@ COPIED = "copied"              # data copied to the server, not registered
 NODATA = "no-datasource"       # this service type reads nothing
 UNRESOLVED = "unresolved"      # the data source could not be read
 
+# The aprx column. A path, or one of these, or '' when --aprx-dir was not
+# given or the service is not published from a project.
+AMBIGUOUS = "AMBIGUOUS"        # two or more projects match: refused
+NOT_FOUND = "NOT FOUND"        # no project matches
+
+# The participants column of a geocode service whose REST resource did not
+# answer, so whether it is a composite is not known.
+PARTICIPANTS_UNKNOWN = "UNKNOWN"
+
+# The columns an inventory from another site needs for --recycle-with.
+RECYCLE_COLUMNS = ("path", "server", "database", "recycle_start",
+                   "recycle_interval")
+
 # The Admin API search that lists the folders registered with the site. Only
 # asked for once per run, and only when a locator-backed service needs it.
 FIND_ITEMS = "/admin/data/findItems"
@@ -122,7 +149,8 @@ FOLDER_QUERY = {"parentPath": "/fileShares", "types": "folder"}
 COLUMNS = ("folder", "service", "type", "path", "status", "source_item_id",
            "all_item_ids", "by_reference", "dataset", "server", "instance",
            "database", "db_user", "version", "capabilities", "extensions",
-           "source_document", "note")
+           "source_document", "note", "participants", "recycle_start",
+           "recycle_interval", "aprx")
 
 # Admin API service type -> portal item type, for the --portal search fallback.
 # Extend as new service types appear; an unknown type skips the fallback rather
@@ -361,17 +389,20 @@ def format_item_ids(pairs):
     return ";".join("%s=%s" % (kind or "?", ident) for kind, ident in pairs)
 
 
-def resource_document(manifest):
+def resource_document(manifest, keys=("onPremisePath", "clientName")):
     """The source document a service was published from, or ''.
 
     The manifest records the .mxd or .aprx path on the publisher's machine.
     That path is what somebody has to open to republish the service, and it is
-    the one thing nobody writes down.
+    the one thing nobody writes down. keys=("onPremisePath",) leaves out
+    clientName, which Esri documents as the publishing machine, not a file.
     """
     if not isinstance(manifest, dict):
         return ""
     for res in dict_entries(manifest.get("resources")):
-        path = res.get("onPremisePath") or res.get("clientName")
+        path = None
+        for key in keys:
+            path = path or res.get(key)
         if isinstance(path, str) and path:
             return path
     return ""
@@ -665,7 +696,7 @@ def database_rows(base, notes, databases):
 
 
 def rows_for_service(record, service_json, manifest, portal_item_id="",
-                     folders=None):
+                     folders=None, participants="", projects=None):
     """Every row for one service. Pure: no network, no file.
 
     One row per dataset, because one service reads several and a row per
@@ -674,7 +705,9 @@ def rows_for_service(record, service_json, manifest, portal_item_id="",
     the server.
 
     folders is registered_folders() for the site, or None when it was not
-    read. Only a locator-backed service consults it.
+    read. Only a locator-backed service consults it. participants is
+    locator_participants() for a geocode service, None when that failed.
+    projects is the .aprx list --aprx-dir found, or None when not asked.
     """
     folder = record.get("folder", "") or ""
     name = record.get("service", "") or ""
@@ -700,7 +733,21 @@ def rows_for_service(record, service_json, manifest, portal_item_id="",
         "all_item_ids": format_item_ids(pairs),
     })
     base.update(service_settings(service_json))
+    base.update(recycle_settings(service_json))
     base["source_document"] = resource_document(manifest)
+    if typ in LOCATOR_TYPES:
+        base["participants"] = (PARTICIPANTS_UNKNOWN if participants is None
+                                else participants)
+        if base["participants"] not in ("", PARTICIPANTS_UNKNOWN):
+            notes.append("composite locator: participants %s are named, not "
+                         "located, so a rebuild of one is not traced"
+                         % ", ".join(participants.split("|")))
+    aprx, aprx_note = match_aprx(
+        resource_document(manifest, keys=("onPremisePath",)), name, typ,
+        projects)
+    base["aprx"] = aprx
+    if aprx_note:
+        notes.append(aprx_note)
 
     databases = manifest_databases(manifest)
     if typ in LOCATOR_TYPES:
@@ -734,6 +781,292 @@ def rows_for_service(record, service_json, manifest, portal_item_id="",
                      % ",".join(sorted(manifest.keys())))
     row["note"] = "; ".join(notes)
     return [row]
+
+
+def locator_participants(body):
+    """The participants of a composite locator, from its REST resource.
+
+    Esri documents `locators` on the GeocodeServer resource as the names of
+    the locators participating in a composite. '' is a single locator, and
+    None is an answer this cannot read, so the column says UNKNOWN. Names
+    are joined with |, which Esri's 14-character reference names cannot hold.
+    """
+    if not isinstance(body, dict):
+        return None
+    locators = body.get("locators")
+    if locators is None:
+        return ""
+    if not isinstance(locators, list):
+        return None
+    names = [entry["name"].strip() for entry in dict_entries(locators)
+             if isinstance(entry.get("name"), str) and entry["name"].strip()]
+    # One unreadable entry is a participant this cannot name, and a short
+    # list would read as a complete one.
+    return "|".join(names) if len(names) == len(locators) else None
+
+
+def strip_loc(path):
+    """A locator path without its .loc extension, so that the file a rebuild
+    writes and the name a service records compare as one."""
+    text = (path or "").strip()
+    return text[:-4] if text.lower().endswith(".loc") else text
+
+
+def locator_relation(row, target, stem):
+    """How one geocode service's locator row relates to the locator at
+    target, as (READS | COPY | UNKNOWN, why), or None for no relation.
+
+    target has no .loc extension, and stem is its last segment in lower case.
+    """
+    workspace, name = row.get("database", ""), row.get("dataset", "")
+    status = row.get("status")
+    if workspace and name and same_path(
+            strip_loc("%s/%s" % (workspace, name)), target):
+        flag = row.get("by_reference")
+        if flag == "true":
+            return ("READS", "reads it in place, so a rebuild reaches it")
+        if flag == "false":
+            return ("COPY", "serves a copy, so a rebuild does not reach it. "
+                            "Overwrite the service.")
+        return ("UNKNOWN", "it names this locator, and copy or reference is "
+                           "UNKNOWN")
+    source = row.get("source_document", "")
+    if (source.lower().endswith(".loc")
+            and same_path(strip_loc(source), target) and status != OK):
+        # The manifest records the file it was published from. A copy reads
+        # its own path under arcgisinput, so this is the only link back.
+        if status == COPIED:
+            return ("COPY", "serves a copy published from it, so a rebuild "
+                            "does not reach it. Overwrite the service.")
+        return ("UNKNOWN", "it was published from this locator, and copy or "
+                           "reference is UNKNOWN")
+    participants = row.get("participants", "")
+    if participants == PARTICIPANTS_UNKNOWN:
+        return ("UNKNOWN", "its REST resource could not be read, so it may be "
+                           "a composite that uses this locator")
+    if participants:
+        names = participants.split("|")
+        hint = ""
+        if stem in [n.lower() for n in names]:
+            hint = " One participant has this locator's name."
+        # A reference name is chosen when the composite is built, and Esri
+        # gives the name, not the path, so a name match proves nothing.
+        return ("UNKNOWN", "a composite locator with participants %s. Esri "
+                           "gives each participant's reference name, not its "
+                           "path, so whether one is this locator is "
+                           "UNKNOWN.%s" % (", ".join(names), hint))
+    return None
+
+
+def locator_users(rows, path):
+    """Every geocode service that reads, copies or may use the locator at
+    path, as [(relation, service path, why)], in inventory order.
+
+    This is the reverse index a rebuild job needs: the inventory says which
+    locator each service reads, and this turns it round.
+    """
+    target = strip_loc(path)
+    stem = (norm_path(target).rsplit("/", 1)[-1].lower() if target else "")
+    out = []
+    seen = set()
+    for row in rows:
+        key = row.get("path", "")
+        # rows_for_service puts a geocode service's locator row first.
+        if row.get("type") not in LOCATOR_TYPES or key in seen:
+            continue
+        seen.add(key)
+        relation = locator_relation(row, target, stem) if target else None
+        if relation:
+            out.append((relation[0], key, relation[1]))
+    return out
+
+
+def describe_locator(path, users):
+    """The lines --locator prints for one locator."""
+    out = ["", "locator %s:" % path]
+    if not users:
+        out.append("  no geocode service on this site names it")
+    for relation, key, why in users:
+        out.append("  %-7s %s: %s" % (relation, key, why))
+    return out
+
+
+def clock_text(value):
+    """A recycle start time as HH:MM, or '' for anything that is not one."""
+    match = (re.match(r"^\s*([0-9]{1,2}):([0-9]{2})\s*$", value)
+             if isinstance(value, str) else None)
+    if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        return ""
+    return "%02d:%02d" % (int(match.group(1)), int(match.group(2)))
+
+
+def hours_text(value):
+    """A recycle interval as whole hours, or '' for anything else.
+
+    [0-9] and not \\d or isdigit, which take a superscript two that int()
+    then refuses.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return ""
+    text = ("%s" % value).strip()
+    if not re.match(r"^[0-9]+$", text) or int(text) < 1:
+        return ""
+    return "%d" % int(text)
+
+
+def recycle_settings(service_json):
+    """The recycle start time and interval a service records, as cells.
+
+    Esri documents recycleInterval in hours, 24 by default. The start time is
+    the recycleStartTime the service JSON carries as HH:MM. It is read only
+    when it is exactly that.
+    """
+    if not isinstance(service_json, dict):
+        return {"recycle_start": "", "recycle_interval": ""}
+    return {"recycle_start": clock_text(service_json.get("recycleStartTime")),
+            "recycle_interval": hours_text(
+                service_json.get("recycleInterval"))}
+
+
+def recycle_minutes(start, interval):
+    """The minutes of the day a service recycles at, or [] when its start
+    time is not known."""
+    start, interval = clock_text(start), hours_text(interval)
+    if not start:
+        return []
+    first = int(start[:2]) * 60 + int(start[3:])
+    step = int(interval) * 60 if interval else 0
+    # shortcut: an interval that does not divide 24 hours lands on other
+    # minutes on later days, and only the first day is modelled. Model a
+    # week if such intervals turn up.
+    if not 0 < step < 1440:
+        return [first]
+    return sorted(set((first + k * step) % 1440
+                      for k in range(1440 // step + 1)))
+
+
+def recycle_skew(sites, crowd=RECYCLE_CROWD):
+    """Geodatabase minutes where services recycle together, as (risks,
+    unnamed).
+
+    sites is [(label, rows)], this site first. A risk is one geodatabase and
+    one minute holding services from two sites, or crowd services from one.
+    Recycling destroys and re-creates every instance of a service, so each
+    one reconnects to its geodatabase then. unnamed counts services on a
+    geodatabase that record no start time, which are left out.
+    """
+    groups = {}
+    unnamed = set()
+    for label, rows in sites:
+        for row in rows:
+            server = (row.get("server") or "").strip()
+            if not server:
+                # A file geodatabase or a locator folder holds no connection.
+                continue
+            who = (label, row.get("path") or "")
+            minutes = recycle_minutes(row.get("recycle_start"),
+                                      row.get("recycle_interval"))
+            if not minutes:
+                unnamed.add(who)
+                continue
+            database = (row.get("database") or "").strip()
+            for minute in minutes:
+                entry = groups.setdefault(
+                    (server.lower(), database.lower(), minute),
+                    {"server": server, "database": database,
+                     "minute": "%02d:%02d" % divmod(minute, 60),
+                     "services": set()})
+                entry["services"].add(who)
+    risks = []
+    for entry in groups.values():
+        labels = sorted(set(label for label, _path in entry["services"]))
+        if len(labels) > 1 or len(entry["services"]) >= crowd:
+            risks.append(dict(entry, sites=labels,
+                              count=len(entry["services"])))
+    risks.sort(key=lambda r: (-r["count"], r["server"].lower(),
+                              r["database"].lower(), r["minute"]))
+    return risks, len(unnamed)
+
+
+def describe_skew(risks, unnamed, compared, crowd=RECYCLE_CROWD, sample=10):
+    """The recycle skew lines. Nothing when there is no risk and no other
+    site was given, so a plain run prints what it always printed."""
+    if not risks and not compared:
+        return []
+    if risks:
+        out = ["", "recycle skew risk: %d geodatabase minute(s) where services "
+               "recycle together. A risk heuristic, not a diagnosis: stagger "
+               "their recycle start times." % len(risks)]
+    else:
+        out = ["", "recycle skew: no geodatabase has services from two sites, "
+               "or %d services from one, recycling in the same minute."
+               % crowd]
+    for risk in risks[:sample]:
+        out.append("  %s on %s at %s: %d service(s) from %d site(s): %s"
+                   % (risk["database"] or "(none)", risk["server"],
+                      risk["minute"], risk["count"], len(risk["sites"]),
+                      ", ".join(risk["sites"])))
+    if len(risks) > sample:
+        out.append("  ...and %d more" % (len(risks) - sample))
+    if unnamed:
+        out.append("  %d service(s) on a geodatabase record no recycle start "
+                   "time and are not counted" % unnamed)
+    return out
+
+
+def path_segments(path):
+    """The segments of a Windows or POSIX path, in lower case."""
+    return [s for s in re.split(r"[\\/]+", (path or "").strip().lower()) if s]
+
+
+def file_stem(path):
+    """The file name of a path without its extension, in lower case."""
+    segments = path_segments(path)
+    name = segments[-1] if segments else ""
+    return name.rsplit(".", 1)[0] if "." in name else name
+
+
+def match_aprx(document, service, typ, projects):
+    """The project to republish a service from, as (aprx cell, note).
+
+    The key is the file name of the document the manifest recorded, or the
+    service name when it recorded none. One project with that name is
+    paired. Several are told apart only by the folders above the file: the
+    one sharing the most trailing segments with the recorded path wins, if
+    it shares at least its parent folder and no other project ties it.
+    Otherwise the answer is AMBIGUOUS and nothing is paired, because
+    picking one by name is how a service is republished from the wrong
+    project.
+    """
+    if (projects is None or typ in NO_DATASOURCE_TYPES + LOCATOR_TYPES
+            or (document or "").lower().endswith(".loc")):
+        return "", ""
+    key = file_stem(document) or (service or "").strip().lower()
+    by = ("the file name of the source document" if file_stem(document)
+          else "the service name only")
+    candidates = [p for p in projects if file_stem(p) == key]
+    if not candidates:
+        return NOT_FOUND, "no project named %s.aprx under --aprx-dir" % key
+    if len(candidates) == 1:
+        return candidates[0], "project matched on %s" % by
+    recorded = path_segments(document)
+    scores = []
+    for project in candidates:
+        mine, shared = path_segments(project), 0
+        while (shared < min(len(mine), len(recorded))
+               and mine[-1 - shared] == recorded[-1 - shared]):
+            shared += 1
+        scores.append((shared, project))
+    best = max(score for score, _p in scores)
+    winners = [p for score, p in scores if score == best]
+    if best >= 2 and len(winners) == 1:
+        return winners[0], ("project matched on the last %d path segments of "
+                            "the source document, among %d projects named "
+                            "%s.aprx" % (best, len(candidates), key))
+    return AMBIGUOUS, ("AMBIGUOUS: %d projects are named %s.aprx (%s), and "
+                       "the recorded path does not tell them apart. None was "
+                       "paired" % (len(candidates), key,
+                                   " | ".join(candidates)))
 
 
 def summarize(rows):
@@ -773,7 +1106,15 @@ def summarize(rows):
             copied.add(key)
     with_item = set((r.get("folder"), r.get("service"), r.get("type"))
                     for r in rows if r.get("source_item_id"))
+    # Every row of a service carries the same aprx cell, so the first row
+    # per service counts it once.
+    paired = [r for r in services
+              if r.get("aprx") not in ("", None, AMBIGUOUS, NOT_FOUND)]
     return {
+        "aprx_paired": len(paired),
+        "aprx_ambiguous": [r for r in services if r.get("aprx") == AMBIGUOUS],
+        "aprx_missing": len([r for r in services
+                             if r.get("aprx") == NOT_FOUND]),
         "copied_locators": len(copied_locators),
         "services": len(services),
         "rows": len(rows),
@@ -809,6 +1150,18 @@ def describe(summary, sample=10):
         out.append("locators copied to the server: %d geocode service(s). "
                    "Rebuilding the source locator does not update these; "
                    "overwrite the service." % summary["copied_locators"])
+    ambiguous = summary["aprx_ambiguous"]
+    if summary["aprx_paired"] or ambiguous or summary["aprx_missing"]:
+        out.append("")
+        out.append("projects: %d paired, %d AMBIGUOUS, %d not found"
+                   % (summary["aprx_paired"], len(ambiguous),
+                      summary["aprx_missing"]))
+        for row in ambiguous[:sample]:
+            why = [part for part in row.get("note", "").split("; ")
+                   if part.startswith(AMBIGUOUS)]
+            out.append("  %s: %s" % (row.get("path", ""), "; ".join(why)))
+        if len(ambiguous) > sample:
+            out.append("  ...and %d more" % (len(ambiguous) - sample))
     if summary["unresolved"]:
         out.append("")
         out.append("unresolved data sources: %d" % len(summary["unresolved"]))
@@ -821,8 +1174,13 @@ def describe(summary, sample=10):
 
 
 def exit_code(summary):
-    """1 when any data source was not read, else 3 when a geocode service
-    serves a copied locator, else 0.
+    """1 when any data source was not read, else 4 when --aprx-dir found a
+    service that two projects match, else 3 when a geocode service serves a
+    copied locator, else 0.
+
+    AMBIGUOUS is a refusal: the pairing a republish needs was not made, so
+    it outranks the copied locator, which is a finding about a pairing that
+    exists.
 
     A copied locator is the finding a scheduled job has to see: the nightly
     rebuild succeeds and the service keeps serving the old copy. Exit 0 hid
@@ -831,6 +1189,8 @@ def exit_code(summary):
     """
     if summary["unresolved"]:
         return 1
+    if summary["aprx_ambiguous"]:
+        return 4
     return 3 if summary["copied_locators"] else 0
 
 
@@ -840,6 +1200,10 @@ def verdict_line(summary):
     if code == 1:
         return ("FAIL: at least one data source could not be read. The "
                 "inventory is incomplete.")
+    if code == 4:
+        return ("AMBIGUOUS: every data source was read, and %d service(s) "
+                "match two or more projects, so none of them was paired. "
+                "Name each project by hand." % len(summary["aprx_ambiguous"]))
     if code == 3:
         return ("COPIED LOCATORS: every data source was read, and %d geocode "
                 "service(s) serve a locator copied to the server. A rebuild "
@@ -1049,8 +1413,11 @@ def portal_searcher(portal, token, public_rest_root, insecure=False,
 
 
 def inventory(get_json, root, records, search=None, echo=None,
-              dump_manifest=None):
+              dump_manifest=None, projects=None):
     """Build every row for every service. One Admin API call each, plus one.
+
+    A geocode service costs one more call, to its REST resource, which is
+    the only place Esri documents the participants of a composite.
 
     A service whose own JSON or manifest will not answer is reported with a
     note rather than dropped. The catalog is the list of services on the site,
@@ -1103,9 +1470,50 @@ def inventory(get_json, root, records, search=None, echo=None,
                 and not locator_flag(locator_entries(
                     workspace, manifest_databases(manifest))[0])):
             known = site_folders()
+        participants = ""
+        if record.get("type") in LOCATOR_TYPES:
+            try:
+                participants = locator_participants(get_json(
+                    "%s/rest/services/%s" % (root, rest_path(
+                        record.get("folder", ""), record.get("service", ""),
+                        record.get("type", "")))))
+            except RuntimeError:
+                participants = None
         rows.extend(rows_for_service(record, service_json, manifest, fallback,
-                                     known))
+                                     known, participants, projects))
     return rows
+
+
+def find_projects(top, walk=os.walk):
+    """Every .aprx below top, sorted.
+
+    A folder that cannot be listed raises. os.walk skips it silently by
+    default, and a skipped folder can hold the second project that makes a
+    pairing AMBIGUOUS, so a quiet skip would turn a refusal into a match.
+    """
+    def refuse(error):
+        raise RuntimeError("--aprx-dir could not be read whole: %s" % error)
+    found = []
+    for folder, _dirs, files in walk(top, onerror=refuse):
+        found.extend(os.path.join(folder, name) for name in files
+                     if name.lower().endswith(".aprx"))
+    return sorted(found)
+
+
+def read_inventory(path):
+    """The rows of an inventory CSV this tool wrote, for --recycle-with."""
+    try:
+        with io.open(path, encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            missing = [c for c in RECYCLE_COLUMNS
+                       if c not in (reader.fieldnames or [])]
+            if missing:
+                raise RuntimeError(
+                    "%s is not an inventory this version wrote: it has no %s "
+                    "column" % (path, ", ".join(missing)))
+            return list(reader)
+    except (IOError, OSError, UnicodeDecodeError, csv.Error) as exc:
+        raise RuntimeError("%s could not be read: %s" % (path, exc))
 
 
 def csv_text(rows):
@@ -2383,8 +2791,9 @@ def self_test():
         def __init__(self, folders=None, services=None, manifests=None,
                      token="TESTTOKEN", secret="hunter2", items=None,
                      open_error=None, not_json=False, fail_after=None,
-                     data_items=None):
+                     data_items=None, rest=None):
             self.folders = folders or {}
+            self.rest = rest or {}
             self.data_items = data_items
             self.services = services or {}
             self.manifests = manifests or {}
@@ -2440,6 +2849,13 @@ def self_test():
                     return {"error": {"code": 403,
                                       "message": "not permitted"}}
                 return self.data_items
+            if "/rest/services/" in path:
+                # The REST resource of a service, which is where Esri
+                # documents a composite locator's participants.
+                tail = path.split("/rest/services/", 1)[1].strip("/")
+                if tail in self.rest:
+                    return self.rest[tail]
+                return {"error": {"code": 404, "message": "no resource " + tail}}
             marker = "/admin/services"
             if marker not in path:
                 return {"error": {"code": 404, "message": "unhandled " + path}}
@@ -3023,7 +3439,8 @@ def self_test():
     check(text.strip() ==
           "folder,service,type,path,status,source_item_id,all_item_ids,"
           "by_reference,dataset,server,instance,database,db_user,version,"
-          "capabilities,extensions,source_document,note",
+          "capabilities,extensions,source_document,note,participants,"
+          "recycle_start,recycle_interval,aprx",
           "a site with no services writes a header and no rows"
           "  <-- pinned defect")
     check(text != "", "and never an empty file, which reads as a crashed run")
@@ -3735,6 +4152,19 @@ def _parse(argv):
                     help="also write every manifest to this JSON file, saved "
                          "passwords masked, for a data source this tool did "
                          "not understand")
+    ap.add_argument("--locator", action="append", default=[],
+                    help="a locator file a rebuild writes. Prints which "
+                         "geocode services read it, serve a copy of it, or "
+                         "may use it through a composite. Repeatable")
+    ap.add_argument("--recycle-with", dest="recycle_with", action="append",
+                    default=[],
+                    help="an inventory CSV this tool wrote for another site. "
+                         "Its services join the recycle skew check. "
+                         "Repeatable")
+    ap.add_argument("--aprx-dir", dest="aprx_dir",
+                    help="a folder of .aprx projects to pair each service "
+                         "with. Two matching projects are AMBIGUOUS and exit "
+                         "4")
     ap.add_argument("--timeout", type=int, default=HTTP_TIMEOUT,
                     help="seconds to wait for one Admin API call (default %d)"
                          % HTTP_TIMEOUT)
@@ -3806,6 +4236,24 @@ def main(argv=None):
         print("error: --dump-manifest and --out cannot be the same file.",
               file=sys.stderr)
         return 64
+    if args.aprx_dir and not os.path.isdir(args.aprx_dir):
+        print("error: --aprx-dir %s is not a folder." % args.aprx_dir,
+              file=sys.stderr)
+        return 64
+    for path in args.recycle_with:
+        if not os.path.isfile(path):
+            print("error: --recycle-with %s is not a file." % path,
+                  file=sys.stderr)
+            return 64
+    # The local inputs are read before the password is asked for, so a bad
+    # one costs no sign-in.
+    try:
+        others = [(os.path.basename(path), read_inventory(path))
+                  for path in args.recycle_with]
+        projects = find_projects(args.aprx_dir) if args.aprx_dir else None
+    except RuntimeError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 2
 
     root = admin_root(args.server)
     dumps = {} if args.dump_manifest else None
@@ -3830,7 +4278,8 @@ def main(argv=None):
         records = walk_catalog(get_json, root)
         rows = inventory(get_json, root, records, search=search,
                          dump_manifest=(None if dumps is None
-                                        else dumps.__setitem__))
+                                        else dumps.__setitem__),
+                         projects=projects)
     except RuntimeError as exc:
         # Exit 2 rather than 1. A site that could not be read is a different
         # fact from a site whose data sources could not all be resolved, and
@@ -3870,7 +4319,12 @@ def main(argv=None):
                 file=sys.stderr)
             return 2
 
-    for line in describe(summary):
+    risks, unnamed = recycle_skew(
+        [(urllib.parse.urlsplit(root).netloc or root, rows)] + others)
+    lines = describe(summary) + describe_skew(risks, unnamed, bool(others))
+    for path in args.locator:
+        lines.extend(describe_locator(path, locator_users(rows, path)))
+    for line in lines:
         print(line)
     if wrote:
         print("\n" + "\n".join("wrote %s" % path for path in wrote))
