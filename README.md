@@ -209,11 +209,10 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-486 assertions, 0 failed
+487 assertions, 0 failed
 ```
 
-The count is the same on Windows (Python 3.13 and 3.9) and Linux (Python 3.12), and every run
-prints the same lines.
+The count is 487 on Windows with Python 3.13. Every run prints the same lines.
 
 ## Requirements
 
