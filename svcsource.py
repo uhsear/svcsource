@@ -3197,6 +3197,9 @@ def self_test():
           == 64, "and so does a timeout that is not a number")
     check(usage_code(["--server", ROOT, "--user", "u"]) is None,
           "while a correct command line does not stop at all")
+    check(usage_code(["--server", ROOT, "--user", "u", "--ap"]) == 64,
+          "a unique prefix of --apply is refused, not read as --apply, so a "
+          "truncated write flag cannot write  <-- pinned defect")
     check(_parse([ROOT, "--user", "u"]).server == ROOT,
           "the server may be given positionally, for a script tool")
     check(_parse([ROOT, "--server", "https://other/arcgis", "--user", "u"]
@@ -3706,6 +3709,7 @@ def same_file(one, other):
 def _parse(argv):
     ap = UsageParser(
         prog="svcsource.py",
+        allow_abbrev=False,
         description="Report the data source and portal item ID behind every "
                     "service on an ArcGIS Server site.",
         epilog="The password comes from %s or an unechoed prompt, never from "
