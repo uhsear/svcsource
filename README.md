@@ -1,8 +1,9 @@
 # svcsource
 
 Report the database, instance, dataset and portal item ID behind every service on an ArcGIS Server
-site, from the Admin API, and whether each geocode service reads its locator in place or a copy of
-it. No arcpy and no Pro licence.
+site, from the Admin API. It also says whether each geocode service reads its locator in place or a
+copy of it, which services read a given locator, which services recycle in the same minute against
+one geodatabase, and which `.aprx` each service was published from. No arcpy and no Pro licence.
 
 You are moving an enterprise geodatabase to a new database server, and the first question is which
 services read it. There are two hundred of them. Nothing you can reach says where any one of them
@@ -28,6 +29,25 @@ locator is in the server's own `arcgisinput` directory, and takes the manifest's
 flag when the manifest names the locator folder. Anything else is UNKNOWN and the run exits 1. A
 locator in a registered folder is UNKNOWN too, because Esri documents that "copy all data" copies
 registered data as well.
+
+The worst failure reports success. A republish batch ran over a whole site. The script logged
+success for every service in it, and not one service had changed. The log was the only evidence
+anyone had, and it said the work was done. A tool that only asks "did the call return?" cannot tell
+those two cases apart. This tool writes what the server records, so you can run it before the batch
+and after it and diff the two files. A service that moved shows in the diff. A batch that did
+nothing leaves the file exactly as it was. The self-test pins both outcomes.
+
+The last three problems are the ones that surface in the week after cutover. You can ask this tool
+about them in the same run, and each one is read only:
+
+- `--locator PATH` turns the inventory round. A rebuild job writes one locator, and this lists
+  which geocode services read it, which serve a copy of it, and which composites might use it.
+  The participants of a composite are named by Esri, not located, so a composite is UNKNOWN. It is
+  never reported as clean.
+- `--recycle-with CSV` flags services that recycle in the same minute against one geodatabase,
+  on this site and on the sites in other inventories. It is a risk heuristic and not a diagnosis.
+- `--aprx-dir FOLDER` pairs each service with the `.aprx` to republish it from. When two projects
+  match, it refuses. The row reads `AMBIGUOUS`, nothing is paired, and the run exits 4.
 
 ```
 $ python svcsource.py --self-test
@@ -205,19 +225,67 @@ PASS  the file says which locator is the copy and which is UNKNOWN
 PASS  a folder search refused over the wire exits 1 with UNKNOWN and says why  <-- pinned defect
 PASS  an HTTP 500 from a real server raises with the token redacted  <-- pinned defect
 PASS  a redirect is refused, so the token in the query string never reaches the host it names  <-- pinned defect
+...
+PASS  one participant that cannot be named makes the list UNKNOWN, because a short list would read as a whole one  <-- pinned defect
+...
+PASS  while a service that reads its own data in place is not tied to the file it was once published from  <-- pinned defect
+...
+PASS  a geocode service whose REST resource was unreadable may be a composite, so it is UNKNOWN for every target  <-- pinned defect
+...
+PASS  a locator is unsettled when any service is UNKNOWN, or when nothing matched and geocode services exist  <-- pinned defect
+...
+PASS  no match with geocode services present is UNSETTLED, names the spelling limit and lists their locator paths, and never says nothing uses the locator  <-- pinned defect
+...
+PASS  a string of digits too long for int() on Python 3.11 is not an interval, and no traceback follows  <-- pinned defect
+...
+PASS  two projects that share only a parent folder name are AMBIGUOUS, never paired on it  <-- pinned defect
+PASS  a recorded .mxd, or no recorded path, cannot tell two projects apart  <-- pinned defect
+...
+PASS  a service whose own JSON was unreadable says so in its note  <-- pinned defect
+...
+PASS  the summary prints the AMBIGUOUS note whole, even when a project path holds a semicolon  <-- pinned defect
+...
+PASS  a service whose JSON would not answer fails the run and the last line says why  <-- pinned defect
+...
+PASS  an unsettled --locator target fails the run with its own last line  <-- pinned defect
+...
+PASS  a folder that cannot be listed stops the run, because a skipped folder can hold the second project  <-- pinned defect
+...
+PASS  a prefix of any new flag, or of --apply, is refused with 64  <-- pinned defect
+...
+PASS  a locator no service matched exits 1 and says it compared path text only  <-- pinned defect
+...
+PASS  a geocode service whose REST resource could not be read leaves the --locator answer UNKNOWN and exits 1, not 0  <-- pinned defect
+...
+PASS  an empty --locator is a usage error, not a clean answer  <-- pinned defect
+...
+PASS  two inventories with the same file name are two sites, told apart by their paths  <-- pinned defect
+...
+PASS  a --recycle-with that is not a file is a usage error before any sign-in  <-- pinned defect
+PASS  an --out that is also a --recycle-with input is a usage error before any sign-in  <-- pinned defect
+PASS  the same --recycle-with file twice is a usage error before any sign-in  <-- pinned defect
+PASS  an --aprx-dir that is not a folder is a usage error before any sign-in  <-- pinned defect
+PASS  and with --apply the input inventory is left as it was  <-- pinned defect
+...
+PASS  --aprx-dir pairs the service it can and refuses the one that two projects match, with exit 4  <-- pinned defect
+...
+PASS  two inventories of one unchanged site are identical, and a service that really moved shows in the diff: a batch that reported success and changed nothing leaves the CSV as it was
+PASS  over a socket --locator finds the service that reads the locator, and the copied locator still exits 3
+PASS  over a socket the AMBIGUOUS refusal exits 4
+PASS  over a socket a geocode resource that answers an error leaves --locator UNKNOWN and exits 1
 PASS  the harness records a false check, a missing exception and two wrong exceptions as four failures, so a broken tool turns this self-test red  <-- pinned defect
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-487 assertions, 0 failed
+602 assertions, 0 failed
 ```
 
-The count is 487 on Windows with Python 3.13. Every run prints the same lines.
+The count is 602 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12. Every run prints the same lines.
 
 ## Requirements
 
 Python 3.9 or newer. Standard library only: `urllib`, `json`, `os`, `posixpath`, `sys`, `ssl`,
-`io`, `csv`, `argparse`, `getpass`, and `contextlib`, `tempfile`, `shutil`, `threading`,
+`io`, `re`, `csv`, `argparse`, `getpass`, and `contextlib`, `tempfile`, `shutil`, `threading`,
 `http.server` and `runpy` in the self-test. It runs on
 ArcGIS Pro's Python and on a plain `python3`. `arcpy` is not used and the `arcgis` package is not
 needed, so it runs on a server, on a laptop with no Pro licence, and in a scheduled job.
@@ -229,11 +297,26 @@ python svcsource.py --self-test
 
 `--self-test` needs no site, no portal, no remote host and no credentials, so you can check the
 tool before you point it at a deployment. It covers the network paths as well as the decisions.
-The token exchange, the catalog walk, the manifest read, the registered-folder search, a dead
-token, a transport failure and the whole command line all run against a stand-in site that answers
-inside the process. The command line then runs again against the same site, served by
-`http.server` on `127.0.0.1`, so the real opener, `urllib` and the socket are exercised too.
-Nothing leaves the machine.
+The token exchange, the catalog walk, the manifest read, the registered-folder search, the REST
+read of a geocode service, a dead token, a transport failure and the whole command line all run
+against a stand-in site that answers inside the process. The command line then runs again against
+the same kind of site, served by `http.server` on `127.0.0.1`, so the real opener, `urllib` and the
+socket are exercised too. Nothing leaves the machine.
+
+Branch coverage of the self-test is 100%:
+
+```
+python -m coverage run --branch svcsource.py --self-test
+python -m coverage report -m
+```
+
+```
+Name           Stmts   Miss Branch BrPart  Cover   Missing
+----------------------------------------------------------
+svcsource.py    2142      0    472      0   100%
+----------------------------------------------------------
+TOTAL           2142      0    472      0   100%
+```
 
 ## Usage
 
@@ -261,6 +344,15 @@ python svcsource.py --server https://gis.example.com/arcgis --user gis_admin \
     --out services.csv --apply
 ```
 
+The three read-only extras ride on the same walk and add no write:
+
+```
+python svcsource.py --server https://gis.example.com/arcgis --user gis_admin \
+    --locator '\\fileserver\locators\streets\Streets.loc' \
+    --recycle-with other_site/services_inventory.csv \
+    --aprx-dir D:\projects
+```
+
 | Flag | Default | What it does |
 |---|---|---|
 | `--server` | none | The site url. Required. `/rest/services`, `/admin/services` and `/manager` are trimmed off it. May also be given positionally. An `http://` url needs `--insecure`. |
@@ -271,9 +363,16 @@ python svcsource.py --server https://gis.example.com/arcgis --user gis_admin \
 | `--portal-user` | `--user` | Portal user for that search. |
 | `--public-rest-root` | none | The site's public REST root. Required by `--portal`: it is the url portal items record. |
 | `--dump-manifest` | off | Also write every manifest to this JSON file, with saved passwords masked. Needs `--apply`. |
+| `--locator` | none | A locator file a rebuild writes. Prints which geocode services read it, serve a copy of it, or may use it. Repeat the flag for more than one. An empty value is a usage error. |
+| `--recycle-with` | none | An inventory CSV this tool wrote for another site, which joins the recycle skew check. Repeat the flag for more than one. |
+| `--aprx-dir` | none | A folder of `.aprx` projects. Each service is paired with one, or refused as `AMBIGUOUS`. The folder is walked, never written. |
 | `--timeout` | `30` | Seconds to wait for one Admin API call. |
 | `--insecure` | off | Skip TLS verification, for a site behind an internal CA, and allow an `http://` server or portal url. |
 | `--self-test` | off | Run the offline assertions and exit. |
+
+A flag may not be shortened. `--ap` is a usage error with exit 64, and it does not mean `--apply`.
+The parser sets `allow_abbrev=False`, and the self-test pins that a prefix of the write flag and of
+each new flag is refused.
 
 There is no `--password` flag and there never will be. `argv` is readable by every process on the
 machine, and it lands in shell history and in scheduler logs. The password comes from
@@ -290,7 +389,8 @@ service count on the site.
 
 ```
 folder,service,type,path,status,source_item_id,all_item_ids,by_reference,dataset,
-server,instance,database,db_user,version,capabilities,extensions,source_document,note
+server,instance,database,db_user,version,capabilities,extensions,source_document,note,
+participants,recycle_start,recycle_interval,aprx
 ```
 
 | Column | What it answers |
@@ -303,6 +403,9 @@ server,instance,database,db_user,version,capabilities,extensions,source_document
 | `server`, `instance`, `database`, `db_user`, `version` | The connection the service reads through. For a geocode service, `database` is the locator folder and `dataset` is the locator. |
 | `extensions` | The enabled extensions, which a plain republish does not recreate. |
 | `source_document` | The `.mxd` or `.aprx` on the publisher's machine, from the manifest. |
+| `participants` | For a geocode service only. The reference names of a composite's locators, joined with `\|`. Blank for a single locator. `UNKNOWN` when the REST resource would not answer. |
+| `recycle_start`, `recycle_interval` | The service's `recycleStartTime` as `HH:MM`, and its `recycleInterval` in whole hours. Blank when the service JSON does not give a value in that form. |
+| `aprx` | With `--aprx-dir`: the paired project, `AMBIGUOUS`, or `NOT FOUND`. Blank without the flag, and for a service that reads no project. |
 
 The summary on the screen is the part you read first. This is a real run against a synthetic site
 served on `127.0.0.1`. The site has one feature service, one geometry service and two geocode
@@ -327,14 +430,16 @@ COPIED LOCATORS: every data source was read, and 1 geocode service(s) serve a lo
 
 The run exits 3. A copied locator is not an unread source, so it is not the gate's 1, but a
 scheduled job that reads only the exit code still sees it. The last line says the same thing, so
-it never says PASS over a copy.
+it never says PASS over a copied locator. A service that copied ordinary data to the server is
+different: the run still exits 0, and the last line says PASS and counts those services.
 
 These are the two geocode rows the same run wrote with `--apply`:
 
 ```
-Locators,Address,GeocodeServer,Locators/Address.GeocodeServer,copied,,,false,Address,,,C:\arcgisserver\directories\arcgissystem\arcgisinput\Locators\Address.GeocodeServer\extracted\p30,,,,,C:\desk\Address.loc,"locator copied to the server at publish time: it is in the server's arcgisinput directory, so rebuilding the source locator does not update this service. Overwrite the service."
-Locators,Streets,GeocodeServer,Locators/Streets.GeocodeServer,ok,,,true,Streets,,,\\fileserver\locators\streets,,,,,C:\desk\Streets.loc,locator read in place: the manifest entry for its folder says byReference true
+Locators,Address,GeocodeServer,Locators/Address.GeocodeServer,copied,,,false,Address,,,C:\arcgisserver\directories\arcgissystem\arcgisinput\Locators\Address.GeocodeServer\extracted\p30,,,,,C:\desk\Address.loc,"locator copied to the server at publish time: it is in the server's arcgisinput directory, so rebuilding the source locator does not update this service. Overwrite the service.",,,,
+Locators,Streets,GeocodeServer,Locators/Streets.GeocodeServer,ok,,,true,Streets,,,\\fileserver\locators\streets,,,,,C:\desk\Streets.loc,locator read in place: the manifest entry for its folder says byReference true,,,,
 ```
+
 
 When the site refuses the registered-folder search, the run says it cannot tell, and exits 1. The
 locator in `arcgisinput` is still reported as a copy, because that verdict needs no folder list:
@@ -354,6 +459,11 @@ For a geodatabase, `data copied to the server` is the line that changes a migrat
 service published with its data copied to the server does not read your enterprise geodatabase at all. It reads a copy inside the server's
 own managed database, and moving the geodatabase it was copied from does nothing to it, in either
 direction. The permissions page will not tell you that and the service url does not hint at it.
+
+A service whose own JSON would not answer is not dropped, and it does not pass. Its item ID, its
+capabilities and its recycle time are blank, which looks the same as a service with no portal item.
+So the row's note says the JSON could not be read, the summary lists the service, and the run
+exits 1.
 
 ## Geocode services: copy or reference
 
@@ -405,10 +515,129 @@ and a `..` segment cannot climb out of a registered folder. A path with a drive 
 backslash is compared without regard to case, as Windows does. A POSIX path is compared exactly.
 A replicated folder is matched on the server's path, not on the publisher's `clientPath`.
 
-The sources, all read on 2026-09-26:
+## Which services read this locator: `--locator`
 
-- Service manifest, `byReference` and `resources.serverPath`:
+The inventory says which locator each service reads. A rebuild job needs the opposite: it writes
+one locator, and it must know which services that reaches. `--locator PATH` turns the table round.
+The `.loc` extension on the path is optional, and the comparison ignores case for a Windows path.
+
+| Verdict | What it means |
+|---|---|
+| `READS` | The service reads this locator in place, so a rebuild reaches it. |
+| `COPY` | The service serves a copy, or was published from this file and serves a copy. A rebuild does not reach it. Overwrite the service. |
+| `UNKNOWN` | The service names this locator and copy or reference is UNKNOWN, or it is a composite, or its REST resource would not answer. |
+
+A composite locator is UNKNOWN for every target. Esri documents the `locators` property of a
+GeocodeServer resource as "names of locators participating in a composite locator". That is a
+reference name, chosen when the composite was built. It is not a path. So a participant that has the
+same name as your locator is pointed out, and it is not believed. The tool reads `locators` from
+`<site>/rest/services/<Folder>/<Name>/GeocodeServer`, one call per geocode service, and writes the
+names to the `participants` column.
+
+When nothing matches, the tool does not say that nothing uses the locator, because it compared path
+text only. A service that reads the same share under a full host name, a drive letter or a DFS path
+does not match. The output then reads `UNSETTLED`, it lists the locator path each geocode service
+records, and the run exits 1. A site with no geocode service at all gets a plain answer and exit 0.
+
+Every `UNKNOWN` verdict and every `UNSETTLED` one exits 1. That is the code a rebuild job should
+gate on. `READS` and `COPY` do not change the code on their own: a `COPY` verdict anywhere on the
+site still exits 3.
+
+## Recycle skew: `--recycle-with`
+
+Two sites can recycle their services in the same minute against one geodatabase. Every service on
+both sites then reconnects together. That is the risk this flag looks for, and it is a heuristic.
+It names a geodatabase and a minute, and it does not say that anything will fail.
+
+Run the tool on each site with `--apply`, then run it on one site with `--recycle-with` and the
+other sites' CSVs. A risk is one geodatabase on one server, in one minute, with services from two or
+more sites. A single site is also a risk when 20 or more of its services share a minute on one
+geodatabase. A service that records no start time is counted as unnamed and is left out. It is never
+guessed. An interval that divides 24 hours is expanded to every minute it recycles at, wrapping past
+midnight.
+
+Two CSVs with the same file name are two sites, told apart by their whole paths. A file that is not
+an inventory from this version is refused with exit 2 before any sign-in.
+
+This is a real run against two synthetic sites on `127.0.0.1`. The other site's CSV was written
+earlier by this tool. Both sites have the same two services on one geodatabase, recycling at 02:00.
+The run also passes `--locator` and `--aprx-dir`. The project folder holds `a\Parcels.aprx`,
+`a\Roads.aprx` and `b\Roads.aprx`:
+
+```
+services: 4
+rows: 4
+
+data sources:
+  gisdb                        DBHOST1                     2 row(s)
+  C:\arcgisserver\directories\arcgissystem\arcgisinput\Locators\Combined.GeocodeServer\extracted\p30 (none)                      1 row(s)
+  \\fileserver\locators\streets (none)                      1 row(s)
+
+portal item IDs: 1 present, 3 missing
+locators copied to the server: 1 geocode service(s). Rebuilding the source locator does not update these; overwrite the service.
+
+projects: 1 paired, 1 AMBIGUOUS, 0 not found
+  Roads.MapServer: AMBIGUOUS: 2 projects are named roads.aprx (projects\a\Roads.aprx | projects\b\Roads.aprx), and the recorded path matches none of them in full. None was paired
+
+recycle skew risk: 1 geodatabase minute(s) where services recycle together. A risk heuristic, not a diagnosis: stagger their recycle start times.
+  gisdb on DBHOST1 at 02:00: 4 service(s) from 2 site(s): 127.0.0.1:18601, services_inventory.csv
+
+locator \\fileserver\locators\streets\Streets.loc:
+  READS   Locators/Streets.GeocodeServer: reads it in place, so a rebuild reaches it
+  UNKNOWN Locators/Combined.GeocodeServer: a composite locator with participants Streets, Zip. Esri gives each participant's reference name, not its path, so whether one is this locator is UNKNOWN. One participant has this locator's name.
+
+wrote siteA/services_inventory.csv
+
+FAIL: 1 --locator target(s) could not be settled. The tool cannot say that no service reads them.
+```
+
+The run exits 1, not 0 and not 4, because the `--locator` target could not be settled for the
+composite. The order of precedence is in the exit code table below.
+
+The premise of the check is that a recycle makes a service's instances reconnect to their
+geodatabase. That is an inference. Esri documents `recycleInterval` as "the maximum amount of time
+(in hours) an instance of the service can run. The default is 24 hours." The pages checked do not
+document `recycleStartTime` at all, or the time zone of the value. The tool reads that field only
+when it is exactly `HH:MM`, and it compares it as written.
+
+## Pairing services with projects: `--aprx-dir`
+
+A service is paired with the wrong `.aprx` when two projects have the same name. A republish from
+the wrong project overwrites the service with the wrong map. So the pairing is made only when it is
+safe, and it is refused when it is not:
+
+| What the tool finds | `aprx` | Run |
+|---|---|---|
+| No project with that file name | `NOT FOUND` | exit 0 |
+| One project with that file name | its path, with a note that the name alone matched | exit 0 |
+| Several, and the recorded source path equals exactly one in full | that path | exit 0 |
+| Several, and no recorded path equals one of them | `AMBIGUOUS`, nothing paired | exit 4 |
+
+The key is the file name of the source document the manifest recorded, without its extension. When
+the manifest recorded none, the key is the service name. A shared parent folder name is not enough:
+`Projects` and `Maps` are names half the projects on a share have. A recorded `.mxd` never equals an
+`.aprx`, so several projects named like it are `AMBIGUOUS`. A geocode service and a geometry service
+read no project, so their `aprx` cell is blank.
+
+The refusal prints both paths and names the cause in the summary and in the `note` column, and no
+pairing is written. The folder is walked, never written. A folder under it that cannot be listed
+stops the run with exit 2, because a skipped folder can hold the second project that makes a pairing
+`AMBIGUOUS`.
+
+A name match is not proof of origin. It tells you which project to open first.
+
+## The sources
+
+These pages are the basis for the Esri behaviour the tool relies on. The recycle, `locators` and
+manifest pages were read on 2026-10-13. The other pages were read while the geocode feature was
+written, and I did not re-read them for this version.
+
+- Service manifest, `byReference`, `clientName`, `onPremisePath` and `resources.serverPath`:
   <https://developers.arcgis.com/rest/enterprise-administration/server/servicemanifest/>
+- Recycle interval, in hours, 24 by default:
+  <https://developers.arcgis.com/rest/enterprise-administration/server/createservice/>
+- `locators` on a GeocodeServer resource, "names of locators participating in a composite
+  locator": <https://developers.arcgis.com/rest/services-reference/enterprise/geocode-service/>
 - GeocodeServer properties `locatorWorkspacePath`, `locatorWorkspaceConnectionString` and
   `locator`: <https://resources.arcgis.com/en/help/server-admin-api/serviceTypes.html> and
   <https://developers.arcgis.com/rest/enterprise-administration/server/createservice/>
@@ -432,8 +661,9 @@ The sources, all read on 2026-09-26:
 - Do not modify files in the system directory by hand:
   <https://doc.esri.com/en/arcgis-enterprise/latest/administer/about-server-directories.html>
 
-Before you trust the result on your own site, open one geocode service in the Admin API with
-`?f=pjson` and check that `properties.locatorWorkspacePath` is there. `--dump-manifest` shows
+No page I could read documents `recycleStartTime`. Open one service in the Admin API with `?f=pjson`
+and check that your site returns it before you trust the skew check. Also open one geocode service
+with `?f=pjson` and check that `properties.locatorWorkspacePath` is there. `--dump-manifest` shows
 whether your site's geocode manifests list the locator under `databases`.
 
 ## Why not the tools that already exist
@@ -453,6 +683,15 @@ All three are per service. The gap is the flat file: every service on the site, 
 dataset, with the database, the host, the version and the item ID in columns you can sort, filter,
 diff against the new site after cutover, and hand to somebody who has no Pro licence and no reason
 to learn the Python API. Nobody clicks through two hundred services twice.
+
+I searched GitHub with `gh search repos` on 2026-10-13 for ArcGIS Server inventory, manifest,
+recycle and admin tools. Two public projects are close, and neither does this job.
+[arcgis-rest-crawler](https://github.com/erikboderek/arcgis-rest-crawler) walks the public REST
+Services Directory and writes folders, services, layers and tables to Markdown. It does well at
+mapping what a site publishes, and the public directory does not carry the data source.
+[Soccer](https://github.com/AaronPLopez/Soccer) reads service status through the Admin API and
+writes a CSV. I have not run either one, and the descriptions are theirs. I found nothing that
+reads the manifest, reverses a locator, or compares recycle times across sites.
 
 ## The part that is actually hard
 
@@ -486,21 +725,24 @@ reports the ID matching the service's own type and lists all of them in the colu
 | Code | Meaning |
 |---|---|
 | 0 | Every data source was read, and no geocode service serves a copied locator. |
-| 1 | At least one data source could not be read, so the inventory is incomplete. |
-| 2 | The site could not be read, or the file could not be written. No inventory is given. |
+| 1 | A data source or a service's own JSON could not be read, or a `--locator` target could not be settled. The inventory is incomplete. |
+| 2 | The site could not be read, a local input (`--recycle-with`, `--aprx-dir`) could not be read, or a file could not be written. No inventory is given. |
 | 3 | Every data source was read, and at least one geocode service serves a copied locator. |
+| 4 | Every data source was read, and `--aprx-dir` found a service that two or more projects match. |
 | 64 | Usage error. |
 
-When one run has both an unread source and a copied locator, it exits 1, because the inventory is
-incomplete. A site that cannot be read exits 2 and prints no inventory at all. A partial inventory
-is worse than none: the services it missed are exactly the ones nobody remembers, which is why
-somebody ran an inventory.
+When one run has several findings, the order is 2, then 1, then 4, then 3. An unread source wins,
+because the inventory is then incomplete. A refused pairing outranks a copied locator, because the
+pairing a republish needs was not made. A site that cannot be read exits 2 and prints no inventory
+at all. A partial inventory is worse than none: the services it missed are exactly the ones nobody
+remembers, which is why somebody ran an inventory.
 
 ## Limits
 
 - It reads one site. A deployment with several federated servers needs one run per server.
-- `System` and `Utilities` are not walked. They hold the services ArcGIS Server publishes for
-  itself, none of which reads your data.
+- `System` and `Utilities` are not walked, and the summary does not say so. They hold the services
+  ArcGIS Server publishes for itself, none of which reads your data. A site that keeps real
+  services in a folder named `Utilities` gets them left out.
 - A `GeometryServer` reads nothing, so an absent manifest is the correct answer for it and is
   reported `no-datasource`. Every other type that answers without a manifest is reported
   `unresolved`, which fails the run. That is the safe direction, and it means a cached map service
@@ -516,8 +758,9 @@ somebody ran an inventory.
   instead of the real directory is not matched either, and reads UNKNOWN.
 - A composite locator is always copied, by Esri's design. Its participating locators can still be
   in a registered folder, and Esri's procedure for those is to rebuild them while the service is
-  stopped. The tool does not read the participants. For a composite, a `copied` row does not prove
-  that a rebuild never reaches it.
+  stopped. The tool names the participants but does not locate them, because Esri gives a reference
+  name and not a path. For a composite, a `copied` row does not prove that a rebuild never reaches
+  it.
 - A locator stored in a geodatabase reads UNKNOWN. A connection string does not say whether that
   database was registered, and a match against the registered databases would be a guess.
 - The registered-folder search needs an account that may read the site's data items. When the
@@ -526,6 +769,45 @@ somebody ran an inventory.
 - The locator field names come from Esri's documentation. They have not been checked against
   the service JSON and manifest of a live site. The self-test runs against synthetic services
   built from that documentation, and no real geocode manifest was available.
+- The reverse locator index reads the composite participants from `<root>/rest/services/...`,
+  where root is the Admin API root. A site whose REST web adaptor differs from its admin one (the
+  `--public-rest-root` example above) gets participants UNKNOWN for every geocode service, so
+  every `--locator` query lists every geocode service as UNKNOWN.
+- A composite locator is detected only when the REST resource lists `locators`. If a real
+  single-locator service lists itself there, every geocode service becomes UNKNOWN for every
+  `--locator` target. That is noise and not a false clean. Esri only says that `locators` returns
+  the participants of a composite.
+- `--locator` matches by exact path spelling only. The host name, drive letter, DFS path and mapped
+  drive are not reconciled, so a service that reads the same share under another spelling is not
+  listed.
+- `--recycle-with` labels a site by the CSV's base name, and by the whole path when two files share
+  a base name. If you give the tool its own earlier CSV for the same site, it counts as a second
+  site and reports a false cross-site risk.
+- The recycle skew crowd threshold of 20 is a guess with no measurement behind it. ArcGIS Server's
+  default recycle time is the same for every service. A site with 20 or more services on one
+  geodatabase prints the risk line on a plain run, with no other site given.
+- A server host written in two spellings in two inventories (a short name against a full host
+  name, or an IP address) does not group in the recycle skew check, so the cross-site risk is
+  missed. The same holds for a database written two ways. Recycle times are compared as written,
+  and the time zone of the start time in the service JSON is not documented. Two sites in different
+  time zones are not reconciled.
+- Recycle times are modelled for one day. An interval that does not divide 24 hours lands on other
+  minutes on later days, which the check ignores. A fractional interval such as 0.5, or a float
+  such as 12.0, is read as none, so the service counts as recycling once a day.
+- `--aprx-dir` pairs a lone project of the right name on the file name alone, even when its folder
+  differs from the recorded path. A recorded `.mxd` pairs with a same-named `.aprx` the same way.
+  Both pairings carry a note. Treat any pairing that is not an exact path as a name match.
+- `--aprx-dir` walks the whole folder. A very large tree is slow, and one unreadable subfolder
+  stops the run with exit 2.
+- A service with no matching project reads `NOT FOUND`, and the run exits 0 with PASS. A wrong but
+  existing folder gives `NOT FOUND` for every service. Only a two-way match exits 4. Check the
+  `projects:` line.
+- The `AMBIGUOUS` and `NOT FOUND` notes put your absolute project paths into the CSV and the
+  console, and the paths mix `/` and `\` on Windows. Do not paste that output into a public issue.
+- A cell in the CSV (a dataset or a database name, a note) is written as the server sent it. A
+  value that starts with `=`, `+`, `-` or `@` is read by Excel as a formula.
+- A participant name that contains `|` is split in two in the `participants` column, because `|`
+  is the separator.
 - The manifest is what the server recorded at publish time. A service republished by hand against
   a different connection, or a registered data store repointed since, is reported as the server
   believes it, not as it is. `--dump-manifest` is there for the cases where that matters.
@@ -536,19 +818,30 @@ somebody ran an inventory.
   "this is the database to move", never as "this service works".
 - A manifest can carry the saved password of the connection the service was published from.
   `--dump-manifest` masks every `PASSWORD=`, `ENCRYPTED_PASSWORD=` and `ENCRYPTED_PASSWORD_UTF8=`
-  field in every string, and every string under a key that contains `password`. Everything else
-  is written as the server sent it, hosts and user names included, so share the dump with care.
-- It is one Admin API call per service for the service JSON and one for the manifest, done in
-  sequence. A site with a thousand services takes as long as that sounds. `--timeout` is per call.
+  field in every string, and every string under a key that contains `password`. A `PWD=` field, a
+  key named `token`, or a `?token=` query string in a manifest string is written as the server sent
+  it. Everything else is written as sent, hosts and user names included, so share the dump with
+  care.
+- The secret redaction is a plain string replace. A password of one or two characters also blanks
+  those characters elsewhere in an error message. A url with credentials in it, such as
+  `https://user:pass@host/arcgis`, is echoed whole in the error message. Put the user name in
+  `--user` and the password in the environment.
+- The token travels in the query string of every GET, as the Admin API accepts, so it can appear
+  in web adaptor and proxy access logs. Use https, and treat those logs as sensitive.
+- The tool makes two Admin API calls per service, one for the service JSON and one for the
+  manifest, and one REST call per geocode service, all in sequence. A site with a thousand services
+  takes as long as that sounds. `--timeout` is per call.
 - The portal fallback matches on the url the portal item recorded, which is not always the url the
   server reports: a web adaptor, a reverse proxy and a direct `:6443` all spell the same service
   differently. It is best effort by design and returns a blank ID rather than stopping the run.
-- It compares nothing. Run it against the old site and the new one and diff the two CSVs with
-  whatever you already use. [svcdrift](https://github.com/uhsear/svcdrift) is the tool for
-  comparing a service against the dataset behind it.
-- It changes nothing, on the server or in the portal. The only calls it makes are
-  `generateToken`, `admin/services`, the service manifest, `admin/data/findItems` and
-  `sharing/rest/search`.
+- It does not compare two sites. Run it against the old site and the new one and diff the two CSVs
+  with whatever you already use. `--recycle-with` compares recycle times only.
+  [svcdrift](https://github.com/uhsear/svcdrift) is the tool for comparing a service against the
+  dataset behind it.
+- It changes nothing, on the server, in the portal or in the folders it reads. The only calls it
+  makes are `generateToken`, `admin/services`, the service manifest, `admin/data/findItems`,
+  `sharing/rest/search` and `<root>/rest/services/<Folder>/<Name>/GeocodeServer`. The only files it
+  writes are `--out` and `--dump-manifest`, and only with `--apply`.
 - A long locator path pushes the data source summary out of its columns. The CSV is not affected.
 - On Windows, the password prompt waits at the console. A scheduled job must set
   `SVCSOURCE_PASSWORD`, or the run waits for a password that nobody types.

@@ -25,6 +25,12 @@ directory is a copy, and a manifest entry for that folder carries its own
 byReference flag. Anything else is UNKNOWN, with the registered folder it is
 in, if any, named in the note.
 
+A republish batch can report success for every service and change nothing.
+The script's own log is the only evidence it offers, and the log says success.
+Run this tool before the batch and after it, and diff the two CSVs. A service
+that really moved shows in the diff. A batch that did nothing leaves the file
+as it was.
+
 Why not the tools that already exist. ArcGIS Server Manager shows a service's
 data source on its own page, and Pro's Analyze and the Share pane both read the
 same manifest when they publish. Both are correct and both are per service. The
@@ -132,6 +138,14 @@ UNRESOLVED = "unresolved"      # the data source could not be read
 # given or the service is not published from a project.
 AMBIGUOUS = "AMBIGUOUS"        # two or more projects match: refused
 NOT_FOUND = "NOT FOUND"        # no project matches
+# The words that end an AMBIGUOUS note, so the summary can cut the note out
+# whole even when a project path holds a semicolon.
+AMBIGUOUS_END = "None was paired"
+
+# The note of a service whose own JSON would not answer. Its item ID reads
+# blank, which is what a service with no portal item reads too.
+JSON_UNREAD = ("service JSON could not be read: item ID, capabilities, "
+               "extensions and recycle time are blank")
 
 # The participants column of a geocode service whose REST resource did not
 # answer, so whether it is a composite is not known.
@@ -715,6 +729,8 @@ def rows_for_service(record, service_json, manifest, portal_item_id="",
     pairs = item_ids(service_json)
     chosen = primary_item_id(pairs, typ)
     notes = []
+    if not isinstance(service_json, dict):
+        notes.append(JSON_UNREAD)
     if not chosen and portal_item_id:
         # The fallback answers for a service whose portalProperties are empty,
         # which is what an unfederated site or a hand-published service looks
@@ -881,13 +897,49 @@ def locator_users(rows, path):
     return out
 
 
-def describe_locator(path, users):
+def locator_unmatched(rows, users):
+    """The geocode services that locator_users did not list, as [(service
+    path, the locator path they record)], in inventory order."""
+    listed = set(key for _relation, key, _why in users)
+    out = []
+    seen = set()
+    for row in rows:
+        key = row.get("path", "")
+        if row.get("type") not in LOCATOR_TYPES or key in listed or key in seen:
+            continue
+        seen.add(key)
+        where = "/".join(part for part in (row.get("database", ""),
+                                           row.get("dataset", "")) if part)
+        out.append((key, where or "(no locator path recorded)"))
+    return out
+
+
+def locator_unsettled(users, unmatched):
+    """True when the tool cannot say who reads a locator: a service may use
+    it (UNKNOWN), or nothing matched while geocode services exist whose
+    paths are only compared as text."""
+    return (any(relation == "UNKNOWN" for relation, _key, _why in users)
+            or (not users and bool(unmatched)))
+
+
+def describe_locator(path, users, unmatched=(), sample=10):
     """The lines --locator prints for one locator."""
     out = ["", "locator %s:" % path]
-    if not users:
-        out.append("  no geocode service on this site names it")
+    if not users and not unmatched:
+        out.append("  this site has no geocode service")
     for relation, key, why in users:
         out.append("  %-7s %s: %s" % (relation, key, why))
+    if unmatched:
+        out.append("  %s %d geocode service(s) were compared on path text "
+                   "only, so one that reads the same share under another "
+                   "spelling (host name, drive letter, DFS path, mapped "
+                   "drive) is not listed above:"
+                   % ("UNSETTLED: no service matched it." if not users
+                      else "Not matched:", len(unmatched)))
+        for key, where in unmatched[:sample]:
+            out.append("    %s reads %s" % (key, where))
+        if len(unmatched) > sample:
+            out.append("    ...and %d more" % (len(unmatched) - sample))
     return out
 
 
@@ -909,7 +961,9 @@ def hours_text(value):
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         return ""
     text = ("%s" % value).strip()
-    if not re.match(r"^[0-9]+$", text) or int(text) < 1:
+    # At most six digits: int() refuses a string of 4300 digits on Python
+    # 3.11 and later, and this reads cells of a CSV somebody may have edited.
+    if not re.match(r"^[0-9]{1,6}$", text) or int(text) < 1:
         return ""
     return "%d" % int(text)
 
@@ -951,9 +1005,10 @@ def recycle_skew(sites, crowd=RECYCLE_CROWD):
 
     sites is [(label, rows)], this site first. A risk is one geodatabase and
     one minute holding services from two sites, or crowd services from one.
-    Recycling destroys and re-creates every instance of a service, so each
-    one reconnects to its geodatabase then. unnamed counts services on a
-    geodatabase that record no start time, which are left out.
+    The premise is that a recycle makes a service's instances reconnect to
+    its geodatabase, so services recycling together reconnect together. That
+    is an inference, not a behaviour this tool checked. unnamed counts
+    services on a geodatabase that record no start time, which are left out.
     """
     groups = {}
     unnamed = set()
@@ -1031,12 +1086,12 @@ def match_aprx(document, service, typ, projects):
 
     The key is the file name of the document the manifest recorded, or the
     service name when it recorded none. One project with that name is
-    paired. Several are told apart only by the folders above the file: the
-    one sharing the most trailing segments with the recorded path wins, if
-    it shares at least its parent folder and no other project ties it.
-    Otherwise the answer is AMBIGUOUS and nothing is paired, because
+    paired, on the name alone. Several are paired only when the recorded
+    path equals exactly one of them in full. A shared parent folder is not
+    enough: Projects and Maps are folder names half the projects on a share
+    have. Otherwise the answer is AMBIGUOUS and nothing is paired, because
     picking one by name is how a service is republished from the wrong
-    project.
+    project. A recorded .mxd never equals an .aprx, so it is AMBIGUOUS too.
     """
     if (projects is None or typ in NO_DATASOURCE_TYPES + LOCATOR_TYPES
             or (document or "").lower().endswith(".loc")):
@@ -1049,28 +1104,22 @@ def match_aprx(document, service, typ, projects):
         return NOT_FOUND, "no project named %s.aprx under --aprx-dir" % key
     if len(candidates) == 1:
         return candidates[0], "project matched on %s" % by
-    recorded = path_segments(document)
-    scores = []
-    for project in candidates:
-        mine, shared = path_segments(project), 0
-        while (shared < min(len(mine), len(recorded))
-               and mine[-1 - shared] == recorded[-1 - shared]):
-            shared += 1
-        scores.append((shared, project))
-    best = max(score for score, _p in scores)
-    winners = [p for score, p in scores if score == best]
-    if best >= 2 and len(winners) == 1:
-        return winners[0], ("project matched on the last %d path segments of "
-                            "the source document, among %d projects named "
-                            "%s.aprx" % (best, len(candidates), key))
+    exact = [p for p in candidates if same_path(p, document)]
+    if len(exact) == 1:
+        return exact[0], ("project matched on the full path of the source "
+                          "document, among %d projects named %s.aprx"
+                          % (len(candidates), key))
     return AMBIGUOUS, ("AMBIGUOUS: %d projects are named %s.aprx (%s), and "
-                       "the recorded path does not tell them apart. None was "
-                       "paired" % (len(candidates), key,
-                                   " | ".join(candidates)))
+                       "the recorded path matches none of them in full. %s"
+                       % (len(candidates), key, " | ".join(candidates),
+                          AMBIGUOUS_END))
 
 
-def summarize(rows):
-    """Counts the summary prints and the gate reads."""
+def summarize(rows, unsettled=0):
+    """Counts the summary prints and the gate reads.
+
+    unsettled is how many --locator targets the tool could not settle.
+    """
     services = []
     seen = set()
     for row in rows:
@@ -1111,6 +1160,8 @@ def summarize(rows):
     paired = [r for r in services
               if r.get("aprx") not in ("", None, AMBIGUOUS, NOT_FOUND)]
     return {
+        "json_unread": [r for r in services if JSON_UNREAD in r.get("note", "")],
+        "locator_unsettled": unsettled,
         "aprx_paired": len(paired),
         "aprx_ambiguous": [r for r in services if r.get("aprx") == AMBIGUOUS],
         "aprx_missing": len([r for r in services
@@ -1157,11 +1208,21 @@ def describe(summary, sample=10):
                    % (summary["aprx_paired"], len(ambiguous),
                       summary["aprx_missing"]))
         for row in ambiguous[:sample]:
-            why = [part for part in row.get("note", "").split("; ")
-                   if part.startswith(AMBIGUOUS)]
-            out.append("  %s: %s" % (row.get("path", ""), "; ".join(why)))
+            why = re.search(r"%s:.*?%s" % (AMBIGUOUS, AMBIGUOUS_END),
+                            row.get("note", ""), re.S)
+            out.append("  %s: %s" % (row.get("path", ""), why.group(0)))
         if len(ambiguous) > sample:
             out.append("  ...and %d more" % (len(ambiguous) - sample))
+    if summary["json_unread"]:
+        out.append("")
+        out.append("service JSON unread: %d. Their item IDs are blank because "
+                   "the Admin API would not answer, not because they have "
+                   "none." % len(summary["json_unread"]))
+        for row in summary["json_unread"][:sample]:
+            out.append("  %s" % row.get("path", ""))
+        if len(summary["json_unread"]) > sample:
+            out.append("  ...and %d more" % (len(summary["json_unread"])
+                                              - sample))
     if summary["unresolved"]:
         out.append("")
         out.append("unresolved data sources: %d" % len(summary["unresolved"]))
@@ -1174,9 +1235,9 @@ def describe(summary, sample=10):
 
 
 def exit_code(summary):
-    """1 when any data source was not read, else 4 when --aprx-dir found a
-    service that two projects match, else 3 when a geocode service serves a
-    copied locator, else 0.
+    """1 when any data source, service JSON or --locator answer was not
+    settled, else 4 when --aprx-dir found a service that two projects match,
+    else 3 when a geocode service serves a copied locator, else 0.
 
     AMBIGUOUS is a refusal: the pairing a republish needs was not made, so
     it outranks the copied locator, which is a finding about a pairing that
@@ -1187,7 +1248,8 @@ def exit_code(summary):
     it from every job that reads only the code. An unread source still wins,
     because the inventory is then incomplete.
     """
-    if summary["unresolved"]:
+    if (summary["unresolved"] or summary["json_unread"]
+            or summary["locator_unsettled"]):
         return 1
     if summary["aprx_ambiguous"]:
         return 4
@@ -1197,9 +1259,17 @@ def exit_code(summary):
 def verdict_line(summary):
     """The last line the CLI prints. It says what the exit code says."""
     code = exit_code(summary)
-    if code == 1:
+    if code == 1 and summary["unresolved"]:
         return ("FAIL: at least one data source could not be read. The "
                 "inventory is incomplete.")
+    if code == 1 and summary["json_unread"]:
+        return ("FAIL: the Admin API would not answer for %d service(s), so "
+                "their item IDs are blank. The inventory is incomplete."
+                % len(summary["json_unread"]))
+    if code == 1:
+        return ("FAIL: %d --locator target(s) could not be settled. The tool "
+                "cannot say that no service reads them."
+                % summary["locator_unsettled"])
     if code == 4:
         return ("AMBIGUOUS: every data source was read, and %d service(s) "
                 "match two or more projects, so none of them was paired. "
@@ -2680,16 +2750,16 @@ def self_test():
     gdb_row = rows_for_service(
         {"folder": "", "service": "Aerials", "type": "MapServer"}, {},
         {"databases": [{"onServerConnectionString":
-                        "DATABASE=D:\\gis\\aerials.gdb",
+                        "DATABASE=D:\\spatial\\imagery.gdb",
                         "byReference": True,
                         "datasets": [{"onServerName": "Imagery2024"}]}]})
     check(summarize(gdb_row)["sources"]
-          == [("D:\\gis\\aerials.gdb", "", 1)],
+          == [("D:\\spatial\\imagery.gdb", "", 1)],
           "a file geodatabase with no host is still counted as a data source"
           "  <-- pinned defect")
     mixed = gdb_row + rows_for_service(
         {"folder": "", "service": "Gone", "type": "MapServer"}, {}, None)
-    check(summarize(mixed)["sources"] == [("D:\\gis\\aerials.gdb", "", 1)]
+    check(summarize(mixed)["sources"] == [("D:\\spatial\\imagery.gdb", "", 1)]
           and len(summarize(mixed)["unresolved"]) == 1,
           "an unresolved service is listed as unresolved and not as a source")
     # The status decides, not whether the row happens to carry a database. A
@@ -3872,9 +3942,11 @@ def self_test():
         ["--server", ROOT, "--user", "gis_admin", "--portal", PORTAL,
          "--public-rest-root", REST_ROOT, "--out",
          os.path.join(tmp, "portal.csv"), "--apply"]))
-    check(code == 0,
+    check(code == 1 and "unresolved data sources" not in text
+          and "service JSON unread: 3" in text,
           "a site whose service JSON will not answer still resolves every "
-          "data source, because the manifest is a separate resource")
+          "data source, because the manifest is a separate resource, and "
+          "fails the run for the item IDs it left blank")
     check("portal item IDs: 1 present" in text,
           "and the item ID the portal search found is counted")
     found_rows, _ = read_back(os.path.join(tmp, "portal.csv"))
@@ -4055,6 +4127,709 @@ def self_test():
           and not any("/elsewhere" in t for t in moved.targets),
           "a redirect is refused, so the token in the query string never "
           "reaches the host it names  <-- pinned defect")
+    # ---- the 2.7 upgrade: reverse locator index, recycle skew, aprx pairing.
+    # Pure decisions first, then each flag through main(), then over a socket.
+    check(locator_participants("a page") is None
+          and locator_participants(None) is None,
+          "a REST answer that is not an object has no readable participants")
+    check(locator_participants({}) == "",
+          "a geocode resource with no locators list is a single locator")
+    check(locator_participants({"locators": "x"}) is None
+          and locator_participants({"locators": {"name": "A"}}) is None,
+          "a locators field that is not a list is UNKNOWN, not a single "
+          "locator")
+    check(locator_participants({"locators": [{"name": "Streets"},
+                                             {"name": " Zip "}]})
+          == "Streets|Zip",
+          "the participants of a composite are joined with a bar")
+    check(locator_participants({"locators": [{"name": "A"}, {"name": ""}]})
+          is None
+          and locator_participants({"locators": [{"name": "A"}, 7]}) is None
+          and locator_participants({"locators": [{"name": 5}]}) is None,
+          "one participant that cannot be named makes the list UNKNOWN, "
+          "because a short list would read as a whole one"
+          "  <-- pinned defect")
+    check(locator_participants({"locators": []}) == "",
+          "an empty list of participants is no composite")
+
+    check(strip_loc("D:/loc/Streets.LOC") == "D:/loc/Streets"
+          and strip_loc("D:/loc/Streets") == "D:/loc/Streets"
+          and strip_loc(None) == "",
+          "a locator path loses its .loc extension, whatever its case")
+
+    def geo(path, **kw):
+        row = {"type": "GeocodeServer", "path": path, "status": OK,
+               "database": "", "dataset": "", "by_reference": "",
+               "source_document": "", "participants": ""}
+        row.update(kw)
+        return row
+    LOC_DB = "\\\\fs\\loc\\streets"
+    reads = geo("L/A.GeocodeServer", database=LOC_DB, dataset="Streets",
+                by_reference="true")
+    copy = geo("L/B.GeocodeServer", database=LOC_DB, dataset="Streets",
+               by_reference="false", status=COPIED)
+    vague = geo("L/C.GeocodeServer", database=LOC_DB, dataset="Streets",
+                status=UNRESOLVED)
+    TARGET = "\\\\fs\\loc\\streets\\Streets.loc"
+    check([u[:2] for u in locator_users([reads], TARGET)]
+          == [("READS", "L/A.GeocodeServer")],
+          "a service reading the locator in place is listed READS")
+    check([u[0] for u in locator_users([copy], TARGET)] == ["COPY"]
+          and "Overwrite the service" in locator_users([copy], TARGET)[0][2],
+          "a service on a copy is listed COPY, with the remedy")
+    check([u[0] for u in locator_users([vague], TARGET)] == ["UNKNOWN"],
+          "a service naming the locator with no flag is UNKNOWN")
+    check(locator_users([reads], "d:\\elsewhere\\Thing.loc") == [],
+          "an unrelated path matches nothing")
+    check(locator_users([reads], TARGET.lower())[0][0] == "READS",
+          "a Windows path matches whatever its case")
+    check(locator_users([reads], "") == [] and locator_users([reads], ".loc")
+          == [],
+          "an empty locator path matches no service")
+    published = geo("L/D.GeocodeServer", database="C:\\copy\\x", dataset="D",
+                    status=COPIED, source_document="D:\\loc\\Streets.loc")
+    check([u[0] for u in locator_users([published], "D:\\loc\\Streets.loc")]
+          == ["COPY"],
+          "a copy is traced back to the file it was published from")
+    published["status"] = UNRESOLVED
+    check([u[0] for u in locator_users([published], "D:\\loc\\Streets.loc")]
+          == ["UNKNOWN"],
+          "and an unsettled one published from it is UNKNOWN")
+    published["status"] = OK
+    check(locator_users([published], "D:\\loc\\Streets.loc") == [],
+          "while a service that reads its own data in place is not tied to "
+          "the file it was once published from  <-- pinned defect")
+    check(locator_users([geo("L/E.GeocodeServer", source_document="D:\\x.mxd")
+                         ], "D:\\x") == [],
+          "a source document that is not a .loc is not a locator")
+    unread = geo("L/F.GeocodeServer", participants=PARTICIPANTS_UNKNOWN)
+    check([u[0] for u in locator_users([unread], TARGET)] == ["UNKNOWN"]
+          and "could not be read" in locator_users([unread], TARGET)[0][2],
+          "a geocode service whose REST resource was unreadable may be a "
+          "composite, so it is UNKNOWN for every target  <-- pinned defect")
+    composite = geo("L/G.GeocodeServer", participants="Zip|Streets")
+    found = locator_users([composite], TARGET)
+    check(found[0][0] == "UNKNOWN" and "One participant has this locator's "
+          "name" in found[0][2] and "Zip, Streets" in found[0][2],
+          "a composite is UNKNOWN, and a participant sharing the locator's "
+          "name is pointed out, not believed")
+    other = locator_users([geo("L/H.GeocodeServer", participants="Zip")],
+                          TARGET)
+    check(other[0][0] == "UNKNOWN" and "has this locator's name" not in
+          other[0][2],
+          "a composite with no namesake is UNKNOWN without the hint")
+    check(locator_users([geo("L/A.GeocodeServer", database=LOC_DB,
+                             dataset="Streets", by_reference="true"),
+                         geo("L/A.GeocodeServer", database=LOC_DB,
+                             dataset="Streets", by_reference="false")],
+                        TARGET)[0][0] == "READS"
+          and len(locator_users([reads, reads], TARGET)) == 1,
+          "a service with several rows is listed once, by its locator row")
+    check(locator_users([{"type": "MapServer", "path": "M.MapServer",
+                          "database": LOC_DB, "dataset": "Streets",
+                          "by_reference": "true"}], TARGET) == [],
+          "a map service is not a geocode service")
+
+    gone = locator_unmatched([reads, geo("L/Z.GeocodeServer")],
+                             locator_users([reads], TARGET))
+    check(gone == [("L/Z.GeocodeServer", "(no locator path recorded)")],
+          "the geocode services not listed are returned with the locator "
+          "path they record, or say they record none")
+    check(locator_unmatched([reads, reads, geo("M.MapServer", type="MapServer")
+                             ], []) == [("L/A.GeocodeServer",
+                                         LOC_DB + "/Streets")],
+          "each is listed once and a map service is not listed")
+    check(locator_unsettled([], []) is False
+          and locator_unsettled([("READS", "k", "w")], [("x", "y")]) is False
+          and locator_unsettled([("READS", "k", "w"), ("UNKNOWN", "j", "w")],
+                                []) is True
+          and locator_unsettled([], [("x", "y")]) is True,
+          "a locator is unsettled when any service is UNKNOWN, or when "
+          "nothing matched and geocode services exist  <-- pinned defect")
+    check(describe_locator("P", [], [])[-1]
+          == "  this site has no geocode service",
+          "a site with no geocode service says so, which is a fact")
+    text_lines = describe_locator("P", [], [("L/A.GeocodeServer", LOC_DB)])
+    check("UNSETTLED: no service matched it." in text_lines[2]
+          and "path text only" in text_lines[2]
+          and text_lines[3] == "    L/A.GeocodeServer reads %s" % LOC_DB
+          and not any("no geocode service" in l for l in text_lines),
+          "no match with geocode services present is UNSETTLED, names the "
+          "spelling limit and lists their locator paths, and never says "
+          "nothing uses the locator  <-- pinned defect")
+    text_lines = describe_locator("P", [("READS", "k", "why")],
+                                  [("j", "w")] * 12)
+    check(text_lines[2].startswith("  READS") and "Not matched: 12"
+          in text_lines[3] and text_lines[-1] == "    ...and 2 more"
+          and len(text_lines) == 15,
+          "a match is listed with the services that were not matched, cut "
+          "at ten")
+
+    check(clock_text("02:00") == "02:00" and clock_text(" 2:05 ") == "02:05"
+          and clock_text("23:59") == "23:59",
+          "a recycle start time is read as HH:MM")
+    check(clock_text("24:00") == "" and clock_text("02:60") == ""
+          and clock_text("noon") == "" and clock_text(None) == ""
+          and clock_text(200) == "",
+          "and anything else is not a start time")
+    check(hours_text(24) == "24" and hours_text(" 6 ") == "6"
+          and hours_text("12") == "12",
+          "a recycle interval is read as whole hours")
+    check(hours_text(0) == "" and hours_text(True) == ""
+          and hours_text(12.0) == "" and hours_text("x") == ""
+          and hours_text(None) == "" and hours_text("-3") == ""
+          and hours_text("\u00b2") == "",
+          "and anything else is not an interval, which includes a float "
+          "and a superscript two")
+    check(hours_text("9" * 4400) == "" and hours_text(10 ** 7) == "",
+          "a string of digits too long for int() on Python 3.11 is not an "
+          "interval, and no traceback follows  <-- pinned defect")
+    check(recycle_settings(None) == {"recycle_start": "",
+                                     "recycle_interval": ""}
+          and recycle_settings({"recycleStartTime": "03:30",
+                                "recycleInterval": 12})
+          == {"recycle_start": "03:30", "recycle_interval": "12"},
+          "the recycle cells come from the service JSON, blank when it is "
+          "unreadable")
+    check(recycle_minutes("", "24") == [] and recycle_minutes("x", 5) == [],
+          "a service with no start time has no recycle minutes")
+    check(recycle_minutes("02:00", "") == [120]
+          and recycle_minutes("02:00", "24") == [120]
+          and recycle_minutes("02:00", "0") == [120],
+          "an interval of a day or more, or none, recycles once")
+    check(recycle_minutes("02:00", "6") == [120, 480, 840, 1200]
+          and recycle_minutes("23:00", "2")
+          == [60, 180, 300, 420, 540, 660, 780, 900, 1020, 1140, 1260, 1380],
+          "an interval that divides the day recycles on each multiple, "
+          "wrapping past midnight")
+    check(recycle_minutes("00:00", "5") == [0, 300, 600, 900, 1200],
+          "an interval that does not divide the day is modelled for the "
+          "first day only")
+
+    def inv(path, server, database, start, interval=""):
+        return {"path": path, "server": server, "database": database,
+                "recycle_start": start, "recycle_interval": interval}
+    risks, unnamed = recycle_skew([
+        ("a", [inv("A/1", "HOSTA", "gdb", "00:00")]),
+        ("b", [inv("B/1", "hosta", "GDB", "00:00")])])
+    check(len(risks) == 1 and risks[0]["sites"] == ["a", "b"]
+          and risks[0]["count"] == 2 and risks[0]["minute"] == "00:00"
+          and unnamed == 0,
+          "two sites recycling in one minute against one geodatabase are a "
+          "risk, whatever the case of the names")
+    check(recycle_skew([("a", [inv("A/1", "H", "g", "00:00"),
+                               inv("A/2", "H", "g", "00:00")])])
+          == ([], 0),
+          "two services of one site in one minute are no risk below the "
+          "crowd")
+    check(len(recycle_skew([("a", [inv("A/1", "H", "g", "00:00"),
+                                   inv("A/2", "H", "g", "00:00"),
+                                   inv("A/3", "H", "g", "00:00")])],
+                           crowd=3)[0]) == 1
+          and recycle_skew([("a", [inv("A/1", "H", "g", "00:00"),
+                                   inv("A/2", "H", "g", "00:00")])],
+                           crowd=3)[0] == [],
+          "a crowd of services from one site is a risk at the threshold and "
+          "not below it")
+    check(recycle_skew([("a", [inv("A/1", "H", "g", "00:00")]),
+                        ("b", [inv("B/1", "H", "g", "00:01")])])[0] == []
+          and recycle_skew([("a", [inv("A/1", "H", "g", "00:00")]),
+                            ("b", [inv("B/1", "H", "h", "00:00")])])[0] == []
+          and recycle_skew([("a", [inv("A/1", "H", "g", "00:00")]),
+                            ("b", [inv("B/1", "J", "g", "00:00")])])[0] == [],
+          "another minute, another geodatabase or another server is no risk")
+    check(recycle_skew([("a", [inv("A/1", "", "g", "00:00")]),
+                        ("b", [inv("B/1", "", "g", "00:00")])]) == ([], 0),
+          "a file geodatabase, which has no server, is not grouped")
+    check(recycle_skew([("a", [inv("A/1", "H", "g", "")]),
+                        ("b", [inv("B/1", "H", "g", "00:00")])])
+          == ([], 1),
+          "a service that records no start time is counted as unnamed, "
+          "never guessed")
+    check(recycle_skew([("a", [inv("A/1", "H", "g", "00:00"),
+                               inv("A/1", "H", "g", "00:00")]),
+                        ("a", [inv("A/1", "H", "g", "00:00")])])[0] == [],
+          "one site is one site, however many rows or files carry its label")
+    many = recycle_skew([("a", [inv("A/1", "H", "g", "00:00"),
+                                inv("A/2", "H", "g", "00:00")]),
+                         ("b", [inv("B/1", "H", "g", "00:00"),
+                                inv("B/2", "H", "g", "01:00"),
+                                inv("A/9", "J", "k", "01:00")]),
+                         ("c", [inv("C/1", "J", "k", "01:00")])])[0]
+    check([(r["server"], r["count"]) for r in many] == [("H", 3), ("J", 2)],
+          "the biggest risk is listed first")
+    check(describe_skew([], 0, False) == [],
+          "no risk and no other site given prints nothing, so a plain run "
+          "is unchanged")
+    check("no geodatabase has services from two sites" in
+          describe_skew([], 0, True)[1]
+          and "20 services from one" in describe_skew([], 0, True)[1],
+          "a clean comparison says what it compared")
+    shown = describe_skew(many, 2, True, sample=1)
+    check(shown[1].startswith("recycle skew risk: 2 geodatabase minute(s)")
+          and "g on H at 00:00: 3 service(s) from 2 site(s): a, b"
+          in shown[2]
+          and shown[3] == "  ...and 1 more"
+          and shown[4].startswith("  2 service(s) on a geodatabase record "
+                                  "no recycle start time"),
+          "a risk is named by geodatabase, server, minute and sites, cut at "
+          "the sample, and the unnamed count follows")
+    check("(none) on" in describe_skew(
+        [dict(many[0], database="")], 0, True)[2],
+          "a risk with no database name prints (none)")
+
+    check(path_segments("C:\\Maps/Roads.APRX") == ["c:", "maps", "roads.aprx"]
+          and path_segments(None) == [],
+          "path segments split on both slashes, in lower case")
+    check(file_stem("C:\\maps\\Roads.aprx") == "roads"
+          and file_stem("Roads") == "roads" and file_stem("") == ""
+          and file_stem("a.b.aprx") == "a.b",
+          "the file stem drops the extension and the folders")
+
+    check(match_aprx("C:\\m\\Roads.aprx", "Roads", "MapServer", None)
+          == ("", ""),
+          "no --aprx-dir, no pairing, no column")
+    check(match_aprx("C:\\m\\Roads.aprx", "Geo", "GeometryServer", [])
+          == ("", "")
+          and match_aprx("C:\\m\\Roads.aprx", "Geo", "GeocodeServer", [])
+          == ("", "")
+          and match_aprx("D:\\loc\\Streets.loc", "S", "MapServer", [])
+          == ("", ""),
+          "a service type that reads no project, and a locator document, "
+          "are not paired")
+    check(match_aprx("C:\\m\\Roads.aprx", "Roads", "MapServer",
+                     ["D:\\x\\A.aprx"])
+          == (NOT_FOUND, "no project named roads.aprx under --aprx-dir"),
+          "no project of that name is NOT FOUND")
+    one = match_aprx("C:\\m\\Roads.aprx", "R", "MapServer",
+                     ["D:\\x\\roads.APRX", "D:\\x\\Other.aprx"])
+    check(one == ("D:\\x\\roads.APRX", "project matched on the file name of "
+                                       "the source document"),
+          "one project of the name is paired on the name, and says so")
+    one = match_aprx("", "Roads", "MapServer", ["D:\\x\\roads.aprx"])
+    check(one[0] == "D:\\x\\roads.aprx" and "service name only" in one[1],
+          "with no source document the service name is the key")
+    one = match_aprx(None, "", "MapServer", ["D:\\x\\roads.aprx"])
+    check(one[0] == NOT_FOUND,
+          "and a service with neither is NOT FOUND")
+    two = ["D:\\Prod\\Roads.aprx", "D:\\Dev\\Roads.aprx"]
+    exact = match_aprx("d:\\dev\\roads.aprx", "Roads", "MapServer", two)
+    check(exact[0] == "D:\\Dev\\Roads.aprx" and "full path" in exact[1],
+          "two projects are told apart when the recorded path equals one in "
+          "full")
+    wrong = match_aprx("\\\\gisshare\\Projects\\Roads.aprx", "Roads",
+                       "MapServer", ["D:\\Dev\\Projects\\Roads.aprx",
+                                     "D:\\Prod\\Roads.aprx"])
+    check(wrong[0] == AMBIGUOUS and wrong[1].startswith("AMBIGUOUS: 2 "
+                                                         "projects")
+          and wrong[1].endswith(AMBIGUOUS_END)
+          and "D:\\Dev\\Projects\\Roads.aprx | D:\\Prod\\Roads.aprx"
+          in wrong[1],
+          "two projects that share only a parent folder name are AMBIGUOUS, "
+          "never paired on it  <-- pinned defect")
+    check(match_aprx("C:\\Projects\\Parks\\Streets.mxd", "Streets",
+                     "MapServer", ["D:\\old\\Parks\\Streets.aprx",
+                                   "D:\\old\\Water\\Streets.aprx"])[0]
+          == AMBIGUOUS
+          and match_aprx("", "Roads", "MapServer", two)[0] == AMBIGUOUS,
+          "a recorded .mxd, or no recorded path, cannot tell two projects "
+          "apart  <-- pinned defect")
+    check(match_aprx("D:\\Dev\\Roads.aprx", "Roads", "MapServer",
+                     ["D:\\Dev\\Roads.aprx", "D:\\Dev\\Roads.aprx"])[0]
+          == AMBIGUOUS,
+          "a path listed twice is not one project")
+
+    # one service through rows_for_service with --aprx-dir and a composite
+    mrows = rows_for_service(
+        {"folder": "", "service": "Roads", "type": "MapServer"},
+        {"recycleStartTime": "02:00", "recycleInterval": 24},
+        {"databases": [{"byReference": True,
+                        "onServerConnectionString": "DATABASE=gisdb;"
+                        "INSTANCE=sde:sqlserver:DB1",
+                        "datasets": [{"onServerName": "gisdb.o.Roads"}]}],
+         "resources": [{"onPremisePath": "C:\\m\\Roads.aprx"}]},
+        projects=["D:\\Dev\\Roads.aprx", "D:\\Prod\\Roads.aprx"])
+    check(mrows[0]["aprx"] == AMBIGUOUS and "AMBIGUOUS: 2 projects"
+          in mrows[0]["note"] and mrows[0]["recycle_start"] == "02:00"
+          and mrows[0]["recycle_interval"] == "24"
+          and mrows[0]["participants"] == "",
+          "the aprx and recycle columns reach the row, and a map service "
+          "has no participants")
+    grows = rows_for_service(
+        {"folder": "L", "service": "Comp", "type": "GeocodeServer"}, {},
+        {}, participants="Streets|Zip")
+    check(grows[0]["participants"] == "Streets|Zip"
+          and "composite locator: participants Streets, Zip" in
+          grows[0]["note"],
+          "a composite locator row names its participants in the note")
+    check(rows_for_service({"folder": "L", "service": "Comp",
+                            "type": "GeocodeServer"}, {}, {},
+                           participants=None)[0]["participants"]
+          == PARTICIPANTS_UNKNOWN
+          and rows_for_service({"folder": "L", "service": "Comp",
+                                "type": "GeocodeServer"}, {}, {}
+                               )[0]["participants"] == "",
+          "participants that could not be read are UNKNOWN in the column, "
+          "and none given is blank")
+    check(rows_for_service({"service": "S", "type": "MapServer"}, None,
+                           {"databases": []})[0]["note"].startswith(
+                               JSON_UNREAD),
+          "a service whose own JSON was unreadable says so in its note"
+          "  <-- pinned defect")
+
+    # the summary, the gate and the printed lines
+    def with_db(document):
+        return {"databases": [{"byReference": True,
+                               "onServerConnectionString":
+                               "DATABASE=gisdb;INSTANCE=sde:sqlserver:DB1",
+                               "datasets": [{"onServerName": "gisdb.o.R"}]}],
+                "resources": [{"onPremisePath": document}]}
+    amb = rows_for_service({"service": "Roads", "type": "MapServer"}, {},
+                           with_db("C:\\m\\Roads.aprx"),
+                           projects=["D:\\a; b\\Roads.aprx",
+                                     "D:\\c\\Roads.aprx"])
+    amb_summary = summarize(amb)
+    check(amb_summary["aprx_ambiguous"] and exit_code(amb_summary) == 4
+          and verdict_line(amb_summary).startswith("AMBIGUOUS: every data "
+                                                   "source was read, and 1 "),
+          "a service that two projects match exits 4 and says AMBIGUOUS")
+    shown = describe(amb_summary)
+    check("projects: 0 paired, 1 AMBIGUOUS, 0 not found" in shown
+          and any(l.endswith("None was paired") and "D:\\a; b\\Roads.aprx"
+                  in l for l in shown),
+          "the summary prints the AMBIGUOUS note whole, even when a project "
+          "path holds a semicolon  <-- pinned defect")
+    many_amb = summarize(amb)
+    many_amb["aprx_ambiguous"] = [amb[0]] * 12
+    check(describe(many_amb)[-1] == "  ...and 2 more",
+          "more than ten AMBIGUOUS services are cut with a count")
+    nf = rows_for_service({"service": "Roads", "type": "MapServer"}, {},
+                          with_db("C:\\m\\Roads.aprx"), projects=[])
+    paired_row = rows_for_service(
+        {"service": "Parcels", "type": "MapServer"}, {},
+        with_db("C:\\m\\parcels.aprx"), projects=["D:\\a\\Parcels.aprx"])
+    check(summarize(nf + paired_row)["aprx_missing"] == 1
+          and summarize(nf + paired_row)["aprx_paired"] == 1
+          and "projects: 1 paired, 0 AMBIGUOUS, 1 not found"
+          in describe(summarize(nf + paired_row)),
+          "paired and not found projects are counted per service")
+    check(exit_code(summarize(nf)) == 0
+          and "PASS" in verdict_line(summarize(nf)),
+          "NOT FOUND does not fail the run, which the README states")
+    unreadable = rows_for_service({"service": "Roads", "type": "MapServer"},
+                                  None, with_db(""))
+    sj = summarize(unreadable)
+    check(len(sj["json_unread"]) == 1 and exit_code(sj) == 1
+          and verdict_line(sj).startswith("FAIL: the Admin API would not "
+                                          "answer for 1 service(s)")
+          and "service JSON unread: 1." in " ".join(describe(sj)),
+          "a service whose JSON would not answer fails the run and the last "
+          "line says why  <-- pinned defect")
+    many_json = summarize(unreadable)
+    many_json["json_unread"] = [unreadable[0]] * 12
+    check(describe(many_json)[-1] == "  ...and 2 more",
+          "and more than ten are cut with a count")
+    check(summarize([], 2)["locator_unsettled"] == 2
+          and exit_code(summarize([], 2)) == 1
+          and verdict_line(summarize([], 2)).startswith(
+              "FAIL: 2 --locator target(s) could not be settled"),
+          "an unsettled --locator target fails the run with its own last "
+          "line  <-- pinned defect")
+    check(exit_code(dict(sj, json_unread=[], aprx_ambiguous=[1],
+                         unresolved=[1])) == 1,
+          "an unread source outranks an AMBIGUOUS project")
+    check(exit_code(dict(amb_summary, copied_locators=1)) == 4,
+          "and an AMBIGUOUS project outranks a copied locator")
+
+    # the two readers --aprx-dir and --recycle-with use
+    tree = os.path.join(tmp, "projects")
+    for rel in ("a", "b; c", "d"):
+        os.makedirs(os.path.join(tree, rel))
+    for rel in ("a/Parcels.aprx", "b; c/Roads.APRX", "d/Roads.aprx",
+                "d/notes.txt", "d/Roads.aprx.bak"):
+        io.open(os.path.join(tree, rel), "w").close()
+    found_projects = find_projects(tree)
+    check([os.path.basename(p) for p in found_projects]
+          == ["Parcels.aprx", "Roads.APRX", "Roads.aprx"]
+          and found_projects == sorted(found_projects),
+          "every .aprx below the folder is found, sorted, and nothing else")
+
+    def refusing_walk(top, onerror=None):
+        onerror(OSError("denied"))
+    raises(lambda: find_projects(tree, walk=refusing_walk),
+           "a folder that cannot be listed stops the run, because a skipped "
+           "folder can hold the second project  <-- pinned defect")
+    good_csv = os.path.join(tmp, "siteB.csv")
+    replace_file(good_csv, csv_text([inv("B/1", "H", "g", "00:00")]))
+    check(read_inventory(good_csv)[0]["path"] == "B/1",
+          "an inventory this tool wrote is read back")
+    bare_csv = os.path.join(tmp, "bare.csv")
+    with io.open(bare_csv, "w") as handle:
+        handle.write("path,server\nB/1,H\n")
+    raises(lambda: read_inventory(bare_csv),
+           "a CSV without the recycle columns is refused, naming them")
+    empty_csv = os.path.join(tmp, "empty.csv")
+    io.open(empty_csv, "w").close()
+    raises(lambda: read_inventory(empty_csv), "an empty file is refused")
+    raises(lambda: read_inventory(os.path.join(tmp, "nope.csv")),
+           "a missing file is refused with a message")
+    binary_csv = os.path.join(tmp, "binary.csv")
+    with io.open(binary_csv, "wb") as handle:
+        handle.write(b"\xff\xfe\xfa\xfb")
+    raises(lambda: read_inventory(binary_csv),
+           "a file that is not UTF-8 is refused with a message")
+    huge_csv = os.path.join(tmp, "huge.csv")
+    with io.open(huge_csv, "w") as handle:
+        handle.write(",".join(RECYCLE_COLUMNS) + "\n" + "x" * 200000
+                     + ",1,2,3,4\n")
+    raises(lambda: read_inventory(huge_csv),
+           "a CSV with a field past the csv module's limit is refused with "
+           "a message")
+
+    # the new flags, through the parser and through main()
+    parsed = _parse(["--server", ROOT, "--user", "u", "--locator", "a",
+                     "--locator", "b", "--recycle-with", "x.csv",
+                     "--aprx-dir", "projects"])
+    check(parsed.locator == ["a", "b"] and parsed.recycle_with == ["x.csv"]
+          and parsed.aprx_dir == "projects",
+          "--locator and --recycle-with repeat, and --aprx-dir is read")
+    plain = _parse(["--server", ROOT, "--user", "u"])
+    check(plain.locator == [] and plain.recycle_with == []
+          and plain.aprx_dir is None,
+          "all three are off by default")
+    check(usage_code(["--server", ROOT, "--user", "u", "--locat", "x"]) == 64
+          and usage_code(["--server", ROOT, "--user", "u", "--recycle",
+                          "x"]) == 64
+          and usage_code(["--server", ROOT, "--user", "u", "--aprx",
+                          "x"]) == 64
+          and usage_code(["--server", ROOT, "--user", "u", "--app"]) == 64,
+          "a prefix of any new flag, or of --apply, is refused with 64"
+          "  <-- pinned defect")
+
+    GEO_REST = {"Locators/Address/GeocodeServer": {"capabilities": "Geocode"},
+                "Locators/Streets/GeocodeServer": {}}
+    STREETS_LOC = REG_DIR + "\\streets\\Streets.loc"
+    code, text = serving(geo_site(manifests=GEO_LISTED, rest=GEO_REST),
+                         lambda: run(["--server", ROOT, "--user",
+                                      "gis_admin", "--locator",
+                                      STREETS_LOC]))
+    check(code == 3 and "locator %s:" % STREETS_LOC in text
+          and "  READS   Locators/Streets.GeocodeServer: reads it in place"
+          in text and "Not matched: 1 geocode service(s)" in text
+          and "Locators/Address.GeocodeServer reads %s" % COPY_DIR in text,
+          "--locator lists the service that reads the locator in place, "
+          "lists the others it did not match, and the run keeps exit 3 for "
+          "the copy elsewhere on the site")
+    code, text = serving(geo_site(manifests=GEO_LISTED, rest=GEO_REST),
+                         lambda: run(["--server", ROOT, "--user",
+                                      "gis_admin", "--locator",
+                                      "D:\\desk\\Nothing.loc"]))
+    check(code == 1 and "UNSETTLED: no service matched it." in text
+          and "no geocode service on this site names it" not in text
+          and text.rstrip().endswith("FAIL: 1 --locator target(s) could "
+                                     "not be settled. The tool cannot say "
+                                     "that no service reads them."),
+          "a locator no service matched exits 1 and says it compared path "
+          "text only  <-- pinned defect")
+    code, text = serving(geo_site(manifests=GEO_LISTED, rest=GEO_REST),
+                         lambda: run(["--server", ROOT, "--user",
+                                      "gis_admin", "--locator",
+                                      "C:\\desk\\Address.loc"]))
+    check("COPY    Locators/Address.GeocodeServer: serves a copy" in text,
+          "a copy is traced to the file it was published from")
+    code, text = serving(geo_site(manifests=GEO_LISTED), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--locator", STREETS_LOC]))
+    check(code == 1 and "UNKNOWN Locators/Address.GeocodeServer: its REST "
+          "resource could not be read" in text and "FAIL:" in text,
+          "a geocode service whose REST resource could not be read leaves "
+          "the --locator answer UNKNOWN and exits 1, not 0"
+          "  <-- pinned defect")
+    code, text = serving(geo_site(manifests=GEO_LISTED), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin"]))
+    check(code == 3 and "UNKNOWN" not in text,
+          "without --locator the same unreadable resource changes nothing "
+          "about the run")
+    comp_rest = dict(GEO_REST, **{"Locators/Streets/GeocodeServer": {
+        "locators": [{"name": "Streets"}, {"name": "Zip"}]}})
+    code, text = serving(geo_site(manifests=GEO_LISTED, rest=comp_rest),
+                         lambda: run(["--server", ROOT, "--user",
+                                      "gis_admin", "--locator",
+                                      "D:\\other\\Zip.loc"]))
+    check(code == 1 and "UNKNOWN Locators/Streets.GeocodeServer: a composite "
+          "locator with participants Streets, Zip" in text,
+          "a composite's participants are UNKNOWN for a locator it may use")
+    comp_csv = os.path.join(tmp, "comp.csv")
+    code, text = serving(geo_site(manifests=GEO_LISTED, rest=comp_rest),
+                         lambda: run(["--server", ROOT, "--user",
+                                      "gis_admin", "--apply", "--out",
+                                      comp_csv]))
+    comp_rows = dict((r["service"], r) for r in read_back(comp_csv)[0])
+    check(comp_rows["Streets"]["participants"] == "Streets|Zip"
+          and "composite locator: participants Streets, Zip"
+          in comp_rows["Streets"]["note"]
+          and comp_rows["Address"]["participants"] == ""
+          and comp_rows["Parcels"]["participants"] == "",
+          "the participants reach the file, for geocode services only")
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--locator",
+         "D:\\loc\\Streets.loc"]))
+    check(code == 0 and "this site has no geocode service" in text,
+          "a site with no geocode service answers a --locator plainly")
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--locator", "  "]))
+    check(code == 64 and "--locator needs a locator path" in text
+          and "PASS" not in text,
+          "an empty --locator is a usage error, not a clean answer"
+          "  <-- pinned defect")
+
+    sib_a = os.path.join(tmp, "siteA", "services_inventory.csv")
+    sib_b = os.path.join(tmp, "siteB", "services_inventory.csv")
+    replace_file(sib_a, csv_text([inv("Roads.MapServer", "DBHOST1", "gisdb",
+                                      "02:00")]))
+    replace_file(sib_b, csv_text([inv("Roads.MapServer", "DBHOST1", "gisdb",
+                                      "02:00")]))
+    ctx = dict(SITE_SERVICES)
+    ctx["Transport/Roads.MapServer"] = dict(
+        SITE_SERVICES["Transport/Roads.MapServer"],
+        recycleStartTime="02:00", recycleInterval=24)
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin"]))
+    check("recycle skew" not in text,
+          "a plain run prints no recycle skew line")
+    code, text = serving(site(services=ctx), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--recycle-with", sib_a,
+         "--recycle-with", sib_b]))
+    check(code == 0 and "recycle skew risk: 1 geodatabase minute(s)" in text
+          and "3 service(s) from 3 site(s)" in text and sib_a in text
+          and sib_b in text,
+          "two inventories with the same file name are two sites, told "
+          "apart by their paths  <-- pinned defect")
+    sib_c = os.path.join(tmp, "other_name.csv")
+    replace_file(sib_c, csv_text([inv("Roads.MapServer", "DBHOST1", "gisdb",
+                                      "04:00")]))
+    code, text = serving(site(services=ctx), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--recycle-with", sib_c]))
+    check("recycle skew: no geodatabase has services from two sites" in text,
+          "another site that recycles in another minute is a clean "
+          "comparison")
+    sib_d = os.path.join(tmp, "siteD", "other_name.csv")
+    replace_file(sib_d, csv_text([inv("Roads.MapServer", "DBHOST1", "gisdb",
+                                      "02:00")]))
+    code, text = serving(site(services=ctx), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--recycle-with", sib_d,
+         "--recycle-with", sib_a]))
+    check("3 site(s): gis.example.com, other_name.csv, "
+          "services_inventory.csv" in text,
+          "files with different names are labelled by their base name")
+    for bad_args, why in (
+            (["--recycle-with", os.path.join(tmp, "nothing.csv")],
+             "a --recycle-with that is not a file"),
+            (["--recycle-with", sib_a, "--out", sib_a],
+             "an --out that is also a --recycle-with input"),
+            (["--recycle-with", sib_a, "--recycle-with", sib_a],
+             "the same --recycle-with file twice"),
+            (["--aprx-dir", os.path.join(tmp, "nothing")],
+             "an --aprx-dir that is not a folder")):
+        code, text = serving(site(), lambda: run(
+            ["--server", ROOT, "--user", "gis_admin"] + bad_args))
+        check(code == 64 and "error:" in text and "PASS" not in text,
+              "%s is a usage error before any sign-in  <-- pinned defect"
+              % why)
+    kept = io.open(sib_a, encoding="utf-8").read()
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--recycle-with", sib_a,
+         "--out", sib_a, "--apply"]))
+    check(code == 64 and io.open(sib_a, encoding="utf-8").read() == kept,
+          "and with --apply the input inventory is left as it was"
+          "  <-- pinned defect")
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--recycle-with",
+         bare_csv]))
+    check(code == 2 and "is not an inventory this version wrote" in text
+          and "Traceback" not in text,
+          "a --recycle-with CSV from an older version exits 2 with a "
+          "message")
+
+    pdir = os.path.join(tmp, "pro")
+    for rel in ("a/Parcels.aprx", "b; c/Roads.aprx", "d/Roads.aprx"):
+        os.makedirs(os.path.dirname(os.path.join(pdir, rel)), exist_ok=True)
+        io.open(os.path.join(pdir, rel), "w").close()
+    pro_csv = os.path.join(tmp, "pro.csv")
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--aprx-dir", pdir,
+         "--out", pro_csv, "--apply"]))
+    check(code == 4 and "projects: 1 paired, 1 AMBIGUOUS, 0 not found"
+          in text and text.rstrip().endswith("so none of them was paired. "
+                                             "Name each project by hand."),
+          "--aprx-dir pairs the service it can and refuses the one that "
+          "two projects match, with exit 4  <-- pinned defect")
+    check("Transport/Roads.MapServer: AMBIGUOUS: 2 projects are named "
+          "roads.aprx (" in text and "b; c" in text
+          and "matches none of them in full. None was paired" in text,
+          "the refusal prints both project paths, semicolon and all")
+    pro_rows = dict((r["service"], r) for r in read_back(pro_csv)[0])
+    check(pro_rows["Parcels"]["aprx"] == os.path.join(pdir, "a",
+                                                      "Parcels.aprx")
+          and pro_rows["Roads"]["aprx"] == AMBIGUOUS
+          and pro_rows["Geometry"]["aprx"] == "",
+          "the aprx column holds the pairing, the refusal, or nothing for a "
+          "service that reads no project")
+    sparse = os.path.join(tmp, "sparse")
+    os.makedirs(sparse)
+    io.open(os.path.join(sparse, "Other.aprx"), "w").close()
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--aprx-dir", sparse]))
+    check(code == 0 and "projects: 0 paired, 0 AMBIGUOUS, 2 not found"
+          in text and "PASS" in text,
+          "services with no project are counted NOT FOUND and the run "
+          "still passes, as the README says")
+    dump_path = os.path.join(tmp, "m.json")
+    out_csv = os.path.join(tmp, "o.csv")
+    code, text = serving(site(), lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--dump-manifest",
+         dump_path, "--out", out_csv]))
+    check("%s and %s was not written" % (out_csv, dump_path) in text,
+          "a run without --apply names every file it did not write")
+
+    def site_csv(**kw):
+        return csv_text(serving(site(**kw), lambda: inventory(
+            json_getter("TESTTOKEN"), ROOT,
+            walk_catalog(json_getter("TESTTOKEN"), ROOT))))
+    moved_manifests = dict(SITE_MANIFESTS)
+    moved_manifests["Parcels.FeatureServer"] = {"databases": [{
+        "byReference": True,
+        "onServerConnectionString": "SERVER=DBHOST2;INSTANCE=sde:sqlserver:"
+                                    "DBHOST2;DATABASE=gisdb;USER=sdeowner",
+        "datasets": [{"onServerName": "gisdb.sdeowner.Parcels"}]}]}
+    before_csv = site_csv()
+    check(before_csv == site_csv() and before_csv != site_csv(
+        manifests=moved_manifests) and "DBHOST2" in site_csv(
+            manifests=moved_manifests) and "DBHOST2" not in before_csv,
+          "two inventories of one unchanged site are identical, and a "
+          "service that really moved shows in the diff: a batch that "
+          "reported success and changed nothing leaves the CSV as it was")
+
+    # the same flags over a real socket
+    code, text = over_http(
+        geo_site(manifests=GEO_LISTED, rest=GEO_REST), lambda url: run(
+            ["--server", url, "--user", "gis_admin", "--insecure",
+             "--locator", STREETS_LOC]))
+    check(code == 3 and "READS   Locators/Streets.GeocodeServer" in text,
+          "over a socket --locator finds the service that reads the "
+          "locator, and the copied locator still exits 3")
+    code, text = over_http(site(), lambda url: run(
+        ["--server", url, "--user", "gis_admin", "--insecure", "--aprx-dir",
+         pdir]))
+    check(code == 4 and "1 AMBIGUOUS" in text,
+          "over a socket the AMBIGUOUS refusal exits 4")
+    code, text = over_http(
+        geo_site(manifests=GEO_LISTED), lambda url: run(
+            ["--server", url, "--user", "gis_admin", "--insecure",
+             "--locator", "D:\\desk\\Nothing.loc"]))
+    check(code == 1 and "UNKNOWN Locators/Address.GeocodeServer" in text,
+          "over a socket a geocode resource that answers an error leaves "
+          "--locator UNKNOWN and exits 1")
+
     os.environ.pop(SECRET_ENV, None)
 
     shutil.rmtree(tmp, ignore_errors=True)
@@ -4240,16 +5015,35 @@ def main(argv=None):
         print("error: --aprx-dir %s is not a folder." % args.aprx_dir,
               file=sys.stderr)
         return 64
-    for path in args.recycle_with:
+    for path in args.locator:
+        if not path.strip():
+            print("error: --locator needs a locator path.", file=sys.stderr)
+            return 64
+    for number, path in enumerate(args.recycle_with):
         if not os.path.isfile(path):
             print("error: --recycle-with %s is not a file." % path,
+                  file=sys.stderr)
+            return 64
+        # --out is replaced under --apply, and a file named twice would be
+        # counted as two sites.
+        if same_file(path, args.out):
+            print("error: --recycle-with and --out cannot be the same file.",
+                  file=sys.stderr)
+            return 64
+        if any(same_file(path, earlier)
+               for earlier in args.recycle_with[:number]):
+            print("error: --recycle-with %s is given twice." % path,
                   file=sys.stderr)
             return 64
     # The local inputs are read before the password is asked for, so a bad
     # one costs no sign-in.
     try:
-        others = [(os.path.basename(path), read_inventory(path))
-                  for path in args.recycle_with]
+        names = [os.path.basename(path) for path in args.recycle_with]
+        # The default --out name is the same in every site's folder, so a
+        # base name shared by two files is told apart by its whole path.
+        others = [(path if names.count(name) > 1 else name,
+                   read_inventory(path))
+                  for name, path in zip(names, args.recycle_with)]
         projects = find_projects(args.aprx_dir) if args.aprx_dir else None
     except RuntimeError as exc:
         print("error: %s" % exc, file=sys.stderr)
@@ -4296,7 +5090,12 @@ def main(argv=None):
             file=sys.stderr)
         return 2
 
-    summary = summarize(rows)
+    answers = []
+    for path in args.locator:
+        users = locator_users(rows, path)
+        answers.append((path, users, locator_unmatched(rows, users)))
+    summary = summarize(rows, sum(1 for _p, users, unmatched in answers
+                                  if locator_unsettled(users, unmatched)))
     # Written before anything is printed, so that nothing printed can stop
     # the file being written.
     wrote = []
@@ -4322,15 +5121,16 @@ def main(argv=None):
     risks, unnamed = recycle_skew(
         [(urllib.parse.urlsplit(root).netloc or root, rows)] + others)
     lines = describe(summary) + describe_skew(risks, unnamed, bool(others))
-    for path in args.locator:
-        lines.extend(describe_locator(path, locator_users(rows, path)))
+    for path, users, unmatched in answers:
+        lines.extend(describe_locator(path, users, unmatched))
     for line in lines:
         print(line)
     if wrote:
         print("\n" + "\n".join("wrote %s" % path for path in wrote))
     else:
         print("\nRead only. %s was not written. Re-run with --apply."
-              % args.out)
+              % " and ".join([args.out] + ([args.dump_manifest]
+                                           if args.dump_manifest else [])))
 
     print("\n%s" % verdict_line(summary))
     return exit_code(summary)
