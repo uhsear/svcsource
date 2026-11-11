@@ -103,8 +103,8 @@ LOCATOR_TYPES = ("GeocodeServer",)
 # Seconds to wait for one Admin API call.
 HTTP_TIMEOUT = 30
 
-# Folders to walk before refusing. ArcGIS Server folders are one level deep,
-# so this is a loop guard rather than a depth limit.
+# Folders to walk before refusing. The walk follows a folder listed inside a
+# folder, so this is a loop guard rather than a depth limit.
 MAX_FOLDERS = 512
 
 # Services reading one geodatabase that recycle in the same minute, on one
@@ -935,12 +935,29 @@ def locator_unmatched(rows, users):
     return out
 
 
-def locator_unsettled(users, unmatched):
+def locator_namesakes(path, unmatched):
+    """The unmatched geocode services whose recorded locator has this
+    locator's name under another path.
+
+    A mapped drive, a host name or a DFS path spells the same file
+    differently, and path text cannot join them. The same last segment is
+    the one sign this tool has that a service may read this locator.
+    """
+    target = strip_loc(path)
+    stem = (norm_path(target).rsplit("/", 1)[-1].lower() if target else "")
+    return [(key, where) for key, where in unmatched
+            if stem and norm_path(strip_loc(where)).rsplit("/", 1)[-1].lower()
+            == stem]
+
+
+def locator_unsettled(path, users, unmatched):
     """True when the tool cannot say who reads a locator: a service may use
-    it (UNKNOWN), or nothing matched while geocode services exist whose
-    paths are only compared as text."""
+    it (UNKNOWN), nothing matched while geocode services exist whose paths
+    are only compared as text, or an unmatched service records a locator
+    with this one's name under another path."""
     return (any(relation == "UNKNOWN" for relation, _key, _why in users)
-            or (not users and bool(unmatched)))
+            or (not users and bool(unmatched))
+            or bool(locator_namesakes(path, unmatched)))
 
 
 def describe_locator(path, users, unmatched=(), sample=10):
@@ -961,6 +978,12 @@ def describe_locator(path, users, unmatched=(), sample=10):
             out.append("    %s reads %s" % (key, where))
         if len(unmatched) > sample:
             out.append("    ...and %d more" % (len(unmatched) - sample))
+    namesakes = locator_namesakes(path, unmatched)
+    if namesakes and users:
+        out.append("  UNSETTLED: %d of them record a locator with this "
+                   "name, so each may read it under another spelling: %s"
+                   % (len(namesakes),
+                      ", ".join(key for key, _where in namesakes[:sample])))
     return out
 
 
@@ -4429,13 +4452,38 @@ def self_test():
                              ], []) == [("L/A.GeocodeServer",
                                          LOC_DB + "/Streets")],
           "each is listed once and a map service is not listed")
-    check(locator_unsettled([], []) is False
-          and locator_unsettled([("READS", "k", "w")], [("x", "y")]) is False
-          and locator_unsettled([("READS", "k", "w"), ("UNKNOWN", "j", "w")],
-                                []) is True
-          and locator_unsettled([], [("x", "y")]) is True,
+    check(locator_unsettled(TARGET, [], []) is False
+          and locator_unsettled(TARGET, [("READS", "k", "w")],
+                                [("x", "y")]) is False
+          and locator_unsettled(TARGET, [("READS", "k", "w"),
+                                         ("UNKNOWN", "j", "w")], []) is True
+          and locator_unsettled(TARGET, [], [("x", "y")]) is True,
           "a locator is unsettled when any service is UNKNOWN, or when "
           "nothing matched and geocode services exist  <-- pinned defect")
+    same_name = [("L/M.GeocodeServer", "Z:/locators/Streets"),
+                 ("L/N.GeocodeServer", "Z:/locators/streets.loc")]
+    other_name = [("L/O.GeocodeServer", "Z:/locators/Address"),
+                  ("L/P.GeocodeServer", "(no locator path recorded)")]
+    check(locator_namesakes(TARGET, same_name + other_name) == same_name
+          and locator_namesakes("", same_name) == []
+          and locator_namesakes(TARGET, other_name) == [],
+          "an unmatched service is a namesake when its locator has this "
+          "locator's last segment, with or without .loc, in any case")
+    check(locator_unsettled(TARGET, [("READS", "k", "w")], same_name) is True
+          and locator_unsettled(TARGET, [("READS", "k", "w")], other_name)
+          is False,
+          "a READS answer is unsettled when another service records a "
+          "locator of the same name under another path, and settled when "
+          "the others record different locators  <-- pinned defect")
+    check(describe_locator(TARGET, [("READS", "k", "w")], same_name)[-1]
+          .startswith("  UNSETTLED: 2 of them record a locator with this "
+                      "name") and "L/M.GeocodeServer, L/N.GeocodeServer"
+          in describe_locator(TARGET, [("READS", "k", "w")], same_name)[-1]
+          and not any(line.startswith("  UNSETTLED")
+                      for line in describe_locator(
+                          TARGET, [("READS", "k", "w")], other_name)),
+          "--locator names the namesake services when it is unsettled and "
+          "stays quiet when the others record different locators")
     check(describe_locator("P", [], [])[-1]
           == "  this site has no geocode service",
           "a site with no geocode service says so, which is a fact")
@@ -4831,6 +4879,35 @@ def self_test():
                                      "that no service reads them."),
           "a locator no service matched exits 1 and says it compared path "
           "text only  <-- pinned defect")
+    MAPPED_DIR = "Z:\\locators\\streets"
+    mapped_folders = {"": GEO_FOLDERS[""], "Locators": {
+        "folders": [], "services": GEO_FOLDERS["Locators"]["services"]
+        + [{"serviceName": "StreetsMapped", "type": "GeocodeServer"}]}}
+    mapped_services = dict(GEO_SERVICES, **{
+        "Locators/StreetsMapped.GeocodeServer": {"properties": {
+            "locatorWorkspacePath": MAPPED_DIR, "locator": "Streets"}}})
+    mapped_manifests = dict(GEO_LISTED, **{
+        "Locators/StreetsMapped.GeocodeServer": {"databases": [{
+            "byReference": True,
+            "onServerConnectionString": "DATABASE=" + MAPPED_DIR,
+            "datasets": [{"onServerName": "Streets"}]}]}})
+    code, text = serving(
+        geo_site(folders=mapped_folders, services=mapped_services,
+                 manifests=mapped_manifests,
+                 rest=dict(GEO_REST, **{
+                     "Locators/StreetsMapped/GeocodeServer": {}})),
+        lambda: run(["--server", ROOT, "--user", "gis_admin", "--locator",
+                     STREETS_LOC]))
+    check(code == 1 and "  READS   Locators/Streets.GeocodeServer: reads it "
+          "in place" in text and "UNSETTLED: 1 of them record a locator "
+          "with this name" in text and "Locators/StreetsMapped.GeocodeServer"
+          in text and "PASS" not in text
+          and text.rstrip().endswith("FAIL: 1 --locator target(s) could not "
+                                     "be settled. The tool cannot say that "
+                                     "no service reads them."),
+          "--locator exits 1, not 0, when one service reads the locator in "
+          "place and another reads a locator of the same name through a "
+          "mapped drive  <-- pinned defect")
     code, text = serving(geo_site(manifests=GEO_LISTED, rest=GEO_REST),
                          lambda: run(["--server", ROOT, "--user",
                                       "gis_admin", "--locator",
@@ -5411,8 +5488,9 @@ def main(argv=None):
     for path in args.locator:
         users = locator_users(rows, path)
         answers.append((path, users, locator_unmatched(rows, users)))
-    summary = summarize(rows, sum(1 for _p, users, unmatched in answers
-                                  if locator_unsettled(users, unmatched)))
+    summary = summarize(rows, sum(1 for where, users, unmatched in answers
+                                  if locator_unsettled(where, users,
+                                                       unmatched)))
     # Written before anything is printed, so that nothing printed can stop
     # the file being written.
     wrote = []

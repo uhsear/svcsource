@@ -241,6 +241,9 @@ PASS  one participant that cannot be named makes the list UNKNOWN, because a sho
 PASS  while a service that reads its own data in place is not tied to the file it was once published from  <-- pinned defect
 ...
 PASS  a geocode service whose REST resource was unreadable may be a composite, so it is UNKNOWN for every target  <-- pinned defect
+PASS  an unmatched service is a namesake when its locator has this locator's last segment, with or without .loc, in any case
+PASS  a READS answer is unsettled when another service records a locator of the same name under another path, and settled when the others record different locators  <-- pinned defect
+PASS  --locator names the namesake services when it is unsettled and stays quiet when the others record different locators
 ...
 PASS  a locator is unsettled when any service is UNKNOWN, or when nothing matched and geocode services exist  <-- pinned defect
 ...
@@ -264,6 +267,7 @@ PASS  a folder that cannot be listed stops the run, because a skipped folder can
 PASS  a prefix of any new flag, or of --apply, is refused with 64  <-- pinned defect
 ...
 PASS  a locator no service matched exits 1 and says it compared path text only  <-- pinned defect
+PASS  --locator exits 1, not 0, when one service reads the locator in place and another reads a locator of the same name through a mapped drive  <-- pinned defect
 ...
 PASS  a geocode service whose REST resource could not be read leaves the --locator answer UNKNOWN and exits 1, not 0  <-- pinned defect
 ...
@@ -298,10 +302,10 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-651 assertions, 0 failed
+655 assertions, 0 failed
 ```
 
-The count is 651 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12 and 3.9. Every run prints the same lines.
+The count is 655 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
 
@@ -605,6 +609,12 @@ text only. A service that reads the same share under a full host name, a drive l
 does not match. The output then reads `UNSETTLED`, it lists the locator path each geocode service
 records, and the run exits 1. A site with no geocode service at all gets a plain answer and exit 0.
 
+A match does not settle the others. When one service reads the locator and an unmatched service
+records a locator with the same last name under another path (for example `Z:\locators\streets`
+against `\\fileserver\locators\streets`), the output adds an `UNSETTLED` line that names it and
+the run exits 1. An unmatched service that records a locator with another name does not change the
+answer.
+
 Every `UNKNOWN` verdict and every `UNSETTLED` one exits 1. That is the code a rebuild job should
 gate on. `READS` and `COPY` do not change the code on their own: a `COPY` verdict anywhere on the
 site still exits 3.
@@ -849,7 +859,8 @@ remembers, which is why somebody ran an inventory.
   the participants of a composite.
 - `--locator` matches by exact path spelling only. The host name, drive letter, DFS path and mapped
   drive are not reconciled, so a service that reads the same share under another spelling is not
-  listed.
+  listed. It is flagged `UNSETTLED` when its locator has the same last name. A service that reads
+  the same locator under another spelling and another name is not flagged.
 - `--recycle-with` labels a site by the CSV's base name, and by the whole path when two files share
   a base name. If you give the tool its own earlier CSV for the same site, it counts as a second
   site and reports a false cross-site risk.
@@ -897,6 +908,13 @@ remembers, which is why somebody ran an inventory.
   message, like one that carries `user:pass`. Such a URL cannot succeed, so nothing is written.
 - A server's own message text in a `generateToken` failure is echoed to stderr. The password is
   redacted from it. Anything else the server puts there appears as sent.
+- A catalog listing that has a `services` array but no `folders` key is read as having no folders,
+  so a proxy that strips that key makes the inventory incomplete without a warning. A real
+  ArcGIS Server always sends the key.
+- `--dump-manifest` does not mask `PASSWD=` or `PASS=` fields in a connection string. It masks
+  `PASSWORD=`, `PWD=` and `ENCRYPTED_PASSWORD=` only.
+- Under `--apply` an existing file named `<out>.partial` next to the output is overwritten, even if
+  you made it.
 - A participant name that contains `|` is split in two in the `participants` column, because `|`
   is the separator.
 - The manifest is what the server recorded at publish time. A service republished by hand against
