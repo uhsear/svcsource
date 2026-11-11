@@ -21,10 +21,10 @@ you have just decommissioned. This tool writes that ID into a column before you 
 
 Geocode services have a trap of their own. A nightly job rebuilds the address locator from the
 latest address points, the job log says it succeeded, and the geocoder keeps missing new addresses.
-On one site, eleven of twelve geocode services had been published with the locator copied to the
-server. The rebuild wrote a locator that nothing read. After the services were repointed at the
-registered folder, the unmatched rate on a sample of 400 live addresses fell from 2.2% to 0.8%.
-Nothing had reported an error. For every geocode service, this tool reports `copied` when the
+On one site I worked on, most of the geocode services had been published with the locator copied
+to the server. The rebuild wrote a locator that nothing read. After the services were repointed at
+the registered folder, the geocoder stopped missing the new addresses. That is my own observation
+of one site, not a measurement this tool makes. Nothing had reported an error. For every geocode service, this tool reports `copied` when the
 locator is in the server's own `arcgisinput` directory, and takes the manifest's `byReference`
 flag when the manifest names the locator folder. Anything else is UNKNOWN and the run exits 1. A
 locator in a registered folder is UNKNOWN too, because Esri documents that "copy all data" copies
@@ -174,7 +174,17 @@ PASS  two geocode services that need the registered folders ask for them once  <
 PASS  a folder search the site refuses leaves the registered locator UNKNOWN and the inventory whole  <-- pinned defect
 PASS  while the locator in arcgisinput is still a copy, because that needs no folder list
 ...
-PASS  a portal that will not answer returns a blank ID rather than stopping the inventory  <-- pinned defect
+PASS  a non-ASCII folder, and a service name holding a space or #, are read, and every request carries its token  <-- pinned defect
+...
+PASS  a portal that will not answer returns None, which is not a blank ID, rather than stopping the inventory  <-- pinned defect
+...
+PASS  a portal search that failed marks the row, fails the run and says so, rather than reading as a service with no item  <-- pinned defect
+...
+PASS  a PWD= field, a token= parameter and a key naming a token or secret are masked in the dump  <-- pinned defect
+...
+PASS  a portal whose search is down fails the run from the command line, and the last line says why  <-- pinned defect
+...
+PASS  --aprx-dir that pairs no service fails the run, because a wrong folder cannot be told from a site with no projects  <-- pinned defect
 ...
 PASS  a service that knows its own item ID is not searched for
 PASS  and no search call is made at all  <-- pinned defect
@@ -288,10 +298,10 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-641 assertions, 0 failed
+651 assertions, 0 failed
 ```
 
-The count is 641 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12 and 3.9. Every run prints the same lines.
+The count is 651 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12 and 3.9. Every run prints the same lines.
 
 ## Requirements
 
@@ -314,6 +324,10 @@ against a stand-in site that answers inside the process. The command line then r
 the same kind of site, served by `http.server` on `127.0.0.1`, so the real opener, `urllib` and the
 socket are exercised too. Nothing leaves the machine.
 
+The sample outputs further down are not printed by `--self-test`. I made them by running the tool
+against a local stand-in site, built like the self-test's `http.server` one, with synthetic
+service names, and pasting what it printed.
+
 Branch coverage of the self-test is 100%:
 
 ```
@@ -324,9 +338,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2189      0    480      0   100%
+svcsource.py    2246      0    496      0   100%
 ----------------------------------------------------------
-TOTAL           2189      0    480      0   100%
+TOTAL           2246      0    496      0   100%
 ```
 
 ## Usage
@@ -478,7 +492,7 @@ exits 1.
 
 ## The CSV guards formula-starting cells
 
-Every cell of the file is text from the site: a dataset label, a database name, a user, a source
+Every text cell of the file is text from the site: a dataset label, a database name, a user, a source
 document path, a note. A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a
 carriage return as a formula, and OWASP's CSV injection page lists those characters. So the
 writer puts one apostrophe in front of such a cell. This is the row that a hostile dataset label,
@@ -660,7 +674,7 @@ safe, and it is refused when it is not:
 
 | What the tool finds | `aprx` | Run |
 |---|---|---|
-| No project with that file name | `NOT FOUND` | exit 0 |
+| No project with that file name | `NOT FOUND` | exit 0, unless no service at all was paired: then exit 1 |
 | One project with that file name | its path, with a note that the name alone matched | exit 0 |
 | Several, and the recorded source path equals exactly one in full | that path | exit 0 |
 | Several, and no recorded path equals one of them | `AMBIGUOUS`, nothing paired | exit 4 |
@@ -736,6 +750,9 @@ dataset, with the database, the host, the version and the item ID in columns you
 diff against the new site after cutover, and hand to somebody who has no Pro licence and no reason
 to learn the Python API. Nobody clicks through two hundred services twice.
 
+The statements above about Manager, Pro, the ArcGIS API for Python and the analyzer come from
+Esri's documentation. The self-test does not exercise them.
+
 I searched GitHub with `gh search repos` on 2026-10-13 for ArcGIS Server inventory, manifest,
 recycle and admin tools. Two public projects are close, and neither does this job.
 [arcgis-rest-crawler](https://github.com/erikboderek/arcgis-rest-crawler) walks the public REST
@@ -777,7 +794,7 @@ reports the ID matching the service's own type and lists all of them in the colu
 | Code | Meaning |
 |---|---|
 | 0 | Every data source was read, and no geocode service serves a copied locator. |
-| 1 | A data source or a service's own JSON could not be read, or a `--locator` target could not be settled. The inventory is incomplete. |
+| 1 | A data source or a service's own JSON could not be read, a `--portal` search did not answer, a `--locator` target could not be settled, or `--aprx-dir` paired no service at all and found no ambiguity. The inventory is incomplete. |
 | 2 | The site could not be read, a local input (`--recycle-with`, `--aprx-dir`) could not be read, or a file could not be written. No inventory is given. |
 | 3 | Every data source was read, and at least one geocode service serves a copied locator. |
 | 4 | Every data source was read, and `--aprx-dir` found a service that two or more projects match. |
@@ -794,7 +811,8 @@ remembers, which is why somebody ran an inventory.
 - It reads one site. A deployment with several federated servers needs one run per server.
 - `System` and `Utilities` are not walked, and the summary does not say so. They hold the services
   ArcGIS Server publishes for itself, none of which reads your data. A site that keeps real
-  services in a folder named `Utilities` gets them left out.
+  services in a folder named `Utilities` gets them left out. The skip applies at every depth, so
+  a nested folder with one of those names is skipped too.
 - A `GeometryServer` reads nothing, so an absent manifest is the correct answer for it and is
   reported `no-datasource`. Every other type that answers without a manifest is reported
   `unresolved`, which fails the run. That is the safe direction, and it means a cached map service
@@ -851,8 +869,10 @@ remembers, which is why somebody ran an inventory.
   Both pairings carry a note. Treat any pairing that is not an exact path as a name match.
 - `--aprx-dir` walks the whole folder. A very large tree is slow, and one unreadable subfolder
   stops the run with exit 2.
-- A service with no matching project reads `NOT FOUND`, and the run exits 0 with PASS. A wrong but
-  existing folder gives `NOT FOUND` for every service. Only a two-way match exits 4. Check the
+- A service with no matching project reads `NOT FOUND`, and the run still exits 0 when at least
+  one other service was paired. When `--aprx-dir` pairs no service at all, the run exits 1 with a
+  FAIL line, because a wrong folder looks the same as a site with no projects. A wrong folder that
+  still holds one project of the right name pairs that one service and passes. Check the
   `projects:` line.
 - The `AMBIGUOUS` and `NOT FOUND` notes put your absolute project paths into the CSV and the
   console, and the paths mix `/` and `\` on Windows. Do not paste that output into a public issue.
@@ -865,8 +885,11 @@ remembers, which is why somebody ran an inventory.
   or a quote inside a value is not guarded either.
 - A text cell that really starts with an apostrophe and then a trigger, such as a database named
   `'=x` in an inventory written before the guard existed, is read back with one apostrophe removed.
-- A service or folder name that contains a non-ASCII character cannot be requested, so its row
-  reads "service JSON could not be read" and the run exits 1.
+- A folder or service name from the site is percent-encoded as UTF-8 before it is requested. The
+  self-test proves that for a stand-in site, and a name with a space, a `#` or a non-ASCII letter is read there. It
+  does not prove that every web adaptor decodes such a name the same way. A name that the server
+  will not answer for gives a row that reads "service JSON could not be read" and exit 1. A folder
+  listing that will not answer stops the run with exit 2.
 - The token that `generateToken` returns lasts 60 minutes, as the tool asks. A run longer than that,
   or a site that stops answering part way, ends with exit 1 and unread rows, not exit 2. A
   scheduled job cannot tell that from a data source the tool could not resolve.
@@ -885,12 +908,12 @@ remembers, which is why somebody ran an inventory.
   and getting features back, which is a different tool and a different call. Read an `ok` row as
   "this is the database to move", never as "this service works".
 - A manifest can carry the saved password of the connection the service was published from.
-  `--dump-manifest` masks every `PASSWORD=`, `ENCRYPTED_PASSWORD=` and `ENCRYPTED_PASSWORD_UTF8=`
-  field in every string, and every string under a key that contains `password`. A password that
-  itself contains `;KEY=` leaks its tail after that point. A `PWD=` field, a
-  key named `token`, or a `?token=` query string in a manifest string is written as the server sent
-  it. Everything else is written as sent, hosts and user names included, so share the dump with
-  care.
+  `--dump-manifest` masks every `PASSWORD=`, `PWD=`, `ENCRYPTED_PASSWORD=` and
+  `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=` or `secret=` value up to the
+  next `;`, `&`, quote or space, and every string under a key that contains `password`, `pwd`,
+  `token` or `secret`. A password that itself contains `;KEY=` leaks its tail after that point. A
+  credential under another name is written as the server sent it. Everything else is written as
+  sent, hosts and user names included, so share the dump with care.
 - The secret redaction is a plain string replace. A password of one or two characters also blanks
   those characters elsewhere in an error message. A url with credentials in it, such as
   `https://user:pass@host/arcgis`, is echoed whole in the error message. Put the user name in
@@ -902,7 +925,10 @@ remembers, which is why somebody ran an inventory.
   takes as long as that sounds. `--timeout` is per call.
 - The portal fallback matches on the url the portal item recorded, which is not always the url the
   server reports: a web adaptor, a reverse proxy and a direct `:6443` all spell the same service
-  differently. It is best effort by design and returns a blank ID rather than stopping the run.
+  differently. A search the portal answers with no item leaves the ID blank and the run passes. A
+  search that does not answer, or answers something that is not a result list, adds the note
+  "portal search failed" to the row, lists the service in the summary and exits 1. It does not
+  stop the run.
 - It does not compare two sites. Run it against the old site and the new one and diff the two CSVs
   with whatever you already use. `--recycle-with` compares recycle times only.
   [svcdrift](https://github.com/uhsear/svcdrift) is the tool for comparing a service against the
