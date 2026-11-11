@@ -128,23 +128,27 @@ PORTAL_SECRET_ENV = "SVCSOURCE_PORTAL_PASSWORD"
 # =============================================================================
 
 REDACTED = "***"
-# PASSWORD=, PWD=, ENCRYPTED_PASSWORD= and ENCRYPTED_PASSWORD_UTF8= in a
-# connection string, each up to the next ;KEY= or the end. Stopping at the
-# first semicolon left the tail of a password that holds one.
+# PASSWORD=, PASSWD=, PASS=, PWD=, CREDENTIAL=, ENCRYPTED_PASSWORD= and
+# ENCRYPTED_PASSWORD_UTF8= in a connection string, each up to the next ;KEY=
+# or the end. Stopping at the first semicolon left the tail of a password that
+# holds one.
 PASSWORD_FIELD = re.compile(
-    r"(\b\w*(?:PASSWORD|PWD)\w*\s*=).*?(?=;\s*\w+\s*=|$)", re.I | re.S)
-# token= and secret= in a connection string, a URL query or a log line: the
-# key may end in a quote or take a colon, white space may follow the
-# separator, and the value is a quoted string whole or runs to the next ; &
-# quote or white space. A token is a bearer credential while it lives.
+    r"(\b\w*(?:PASS|PWD|CREDENTIAL)\w*\s*=).*?(?=;\s*\w+\s*=|$)",
+    re.I | re.S)
+# token=, secret=, password: and the like in a connection string, a URL query,
+# a log line or a JSON snippet inside a string: the key may end in a quote or
+# take a colon, white space may follow the separator, and the value is a
+# quoted string whole or runs to the next ; & quote or white space. A token is
+# a bearer credential while it lives. After a colon a password with a space in
+# it is masked to the first space only.
 TOKEN_FIELD = re.compile(
-    r"(\b\w*(?:TOKEN|SECRET)\w*[\"']?\s*[=:]\s*)"
+    r"(\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL)\w*[\"']?\s*[=:]\s*)"
     r"(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^;&\s\"']*)", re.I)
 # user:password@ in the authority of a URL.
 URL_USERINFO = re.compile(r"(://)[^/\s]*@")
 # A key whose name says its value is a credential: everything below it is
 # masked.
-SECRET_KEY = re.compile(r"password|pwd|token|secret", re.I)
+SECRET_KEY = re.compile(r"pass|pwd|token|secret|credential", re.I)
 
 # Row status. The gate reads this column and nothing else.
 OK = "ok"
@@ -169,6 +173,13 @@ JSON_UNREAD = ("service JSON could not be read: item ID, capabilities, "
 # reads blank, which is what a service with no portal item reads too.
 PORTAL_FAILED = ("portal search failed: item ID unknown, not known to be "
                  "absent")
+
+# The note of a service whose --portal search answered with no item. The
+# portal records the url of a service as it was published, which is not always
+# the url --public-rest-root spells, so a miss does not show that no item
+# exists.
+PORTAL_NO_ITEM = ("portal search found no item: item ID unknown, not known "
+                  "to be absent")
 
 # The participants column of a geocode service whose REST resource did not
 # answer, so whether it is a composite is not known.
@@ -786,6 +797,8 @@ def rows_for_service(record, service_json, manifest, portal_item_id="",
         notes.append(JSON_UNREAD)
     if not chosen and portal_item_id is None:
         notes.append(PORTAL_FAILED)
+    if not chosen and portal_item_id is False:
+        notes.append(PORTAL_NO_ITEM)
     if not chosen and portal_item_id:
         # The fallback answers for a service whose portalProperties are empty,
         # which is what an unfederated site or a hand-published service looks
@@ -1241,6 +1254,8 @@ def summarize(rows, unsettled=0):
         "json_unread": [r for r in services if JSON_UNREAD in r.get("note", "")],
         "portal_failed": [r for r in services
                           if PORTAL_FAILED in r.get("note", "")],
+        "portal_no_item": [r for r in services
+                           if PORTAL_NO_ITEM in r.get("note", "")],
         "locator_unsettled": unsettled,
         "aprx_paired": len(paired),
         "aprx_ambiguous": [r for r in services if r.get("aprx") == AMBIGUOUS],
@@ -1303,6 +1318,17 @@ def describe(summary, sample=10):
         if len(summary["portal_failed"]) > sample:
             out.append("  ...and %d more" % (len(summary["portal_failed"])
                                               - sample))
+    if summary["portal_no_item"]:
+        out.append("")
+        out.append("portal search found no item: %d. Their item IDs are "
+                   "blank because no item records the url searched, which "
+                   "may be another spelling of the same service."
+                   % len(summary["portal_no_item"]))
+        for row in summary["portal_no_item"][:sample]:
+            out.append("  %s" % row.get("path", ""))
+        if len(summary["portal_no_item"]) > sample:
+            out.append("  ...and %d more" % (len(summary["portal_no_item"])
+                                              - sample))
     if summary["json_unread"]:
         out.append("")
         out.append("service JSON unread: %d. Their item IDs are blank because "
@@ -1338,7 +1364,7 @@ def aprx_none_paired(summary):
 
 def exit_code(summary):
     """1 when any data source, service JSON, --portal search or --locator
-    answer was not settled, or --aprx-dir paired no service at all, else 4 when --aprx-dir found a service that two projects match,
+    answer was not settled, or a --portal search found no item, or --aprx-dir paired no service at all, else 4 when --aprx-dir found a service that two projects match,
     else 3 when a geocode service serves a copied locator, else 0.
 
     AMBIGUOUS is a refusal: the pairing a republish needs was not made, so
@@ -1351,7 +1377,8 @@ def exit_code(summary):
     because the inventory is then incomplete.
     """
     if (summary["unresolved"] or summary["json_unread"]
-            or summary["portal_failed"] or summary["locator_unsettled"]
+            or summary["portal_failed"] or summary["portal_no_item"]
+            or summary["locator_unsettled"]
             or aprx_none_paired(summary)):
         return 1
     if summary["aprx_ambiguous"]:
@@ -1373,6 +1400,11 @@ def verdict_line(summary):
         return ("FAIL: the portal search failed for %d service(s), so their "
                 "item IDs are blank. The inventory is incomplete."
                 % len(summary["portal_failed"]))
+    if code == 1 and summary["portal_no_item"]:
+        return ("FAIL: the portal search found no item for %d service(s), so "
+                "their item IDs are blank. The tool cannot say whether an "
+                "item exists under another spelling of the url."
+                % len(summary["portal_no_item"]))
     if code == 1 and summary["locator_unsettled"]:
         return ("FAIL: %d --locator target(s) could not be settled. The tool "
                 "cannot say that no service reads them."
@@ -1579,8 +1611,10 @@ def portal_searcher(portal, token, public_rest_root, insecure=False,
     Best effort by design. It returns None on a lookup failure rather than
     raising, so that a portal whose token security is configured differently
     never stops the inventory the operator actually asked for. None is not
-    '': '' says the portal answered and holds no item, None says it did not
-    answer, and the row, the summary and the exit code say so.
+    False: False says the portal answered and holds no item at that url, None
+    says it did not answer, and the row, the summary and the exit code say so. A search the
+    portal answered with no item is False: the item ID is blank, and the tool
+    cannot say the url it searched is the one the portal recorded.
     """
     if not (portal and token and public_rest_root):
         return None
@@ -1604,7 +1638,7 @@ def portal_searcher(portal, token, public_rest_root, insecure=False,
         if not isinstance(results, list):
             return None
         if not results:
-            return ""
+            return False
         ident = (results[0].get("id") if isinstance(results[0], dict)
                  else None)
         return ident if isinstance(ident, str) else None
@@ -3035,13 +3069,25 @@ def self_test():
           "the word after generateToken: is blanked, as the README Limits "
           "say")
     check(mask_passwords({"a": "Password: hunter2", "b": '{"password": "x"}',
-                          "c": "PASSWD=hunter2;USER=u"})
-          == {"a": "Password: hunter2", "b": '{"password": "x"}',
-              "c": "PASSWD=hunter2;USER=u"}
-          and mask_passwords({"passwd": "hunter2", "credential": "x"})
-          == {"passwd": "hunter2", "credential": "x"},
-          "a colon form, a JSON snippet in a string, PASSWD= and a passwd or "
-          "credential key are not masked, as the README Limits say")
+                          "c": "PASSWD=hunter2;USER=u",
+                          "d": "SERVER=h;PASS=hunter2",
+                          "e": "x;CREDENTIAL=hunter2;y=1"})
+          == {"a": "Password: ***", "b": '{"password": ***}',
+              "c": "PASSWD=***;USER=u", "d": "SERVER=h;PASS=***",
+              "e": "x;CREDENTIAL=***;y=1"}
+          and mask_passwords({"passwd": "hunter2", "credential": ["x", 5],
+                              "pass": "z", "ok": "fine"})
+          == {"passwd": "***", "credential": ["***", "***"], "pass": "***",
+              "ok": "fine"},
+          "a colon form, a JSON snippet in a string, PASSWD=, PASS=, "
+          "CREDENTIAL= and a passwd, pass or credential key are masked  "
+          "<-- pinned defect")
+    check("hunter2" not in manifest_text(
+        {"svc.MapServer": {"databases": [{"onServerConnectionString":
+            "SERVER=h;USER=u;PASSWD=hunter2"}], "note": "Password: hunter2",
+            "credential": "hunter2"}}),
+          "no credential form reaches the --dump-manifest text  <-- pinned "
+          "defect")
     check(redact("TOKEN= abc123;x=1") == "TOKEN= ***;x=1"
           and redact('TOKEN="abc 123" x') == 'TOKEN=*** x'
           and redact("SECRET='s3 cr3t'") == "SECRET=***"
@@ -3682,8 +3728,9 @@ def self_test():
           "the portal search finds the item backing a service")
     check(serving(found, lambda: search({"folder": "Transport",
                                          "service": "Roads",
-                                         "type": "MapServer"})) == "",
-          "a service with no matching item searches to a blank ID")
+                                         "type": "MapServer"})) is False,
+          "a service with no matching item searches to False, which is not "
+          "a blank ID that says no item exists  <-- pinned defect")
     check(serving(site(open_error=boom), lambda: search(record)) is None,
           "a portal that will not answer returns None, which is not a blank "
           "ID, rather than stopping the inventory  <-- pinned defect")
@@ -3712,8 +3759,9 @@ def self_test():
               for odd in ({"id": "x"}, 5, "x", [None], [{"id": 5}])),
           "search results that are an object, a number, or hold no text ID "
           "return None rather than ending the inventory  <-- pinned defect")
-    check(serving(OddPortal([]), lambda: search(record)) == "",
-          "an empty result list is an answer: the portal holds no item")
+    check(serving(OddPortal([]), lambda: search(record)) is False,
+          "an empty result list is an answer: the portal holds no item at "
+          "that url")
     check(portal_searcher("", "t", REST_ROOT) is None,
           "no --portal means no fallback at all")
     check(portal_searcher(PORTAL, "t", "") is None,
@@ -3761,9 +3809,33 @@ def self_test():
                    lambda: inventory(
         json_getter("TESTTOKEN"), ROOT, [noitem],
         search=portal_searcher(PORTAL, "PORTALTOKEN", REST_ROOT)))
+    sn = summarize(rows)
     check(rows[0]["source_item_id"] == "" and PORTAL_FAILED not in
-          rows[0]["note"] and exit_code(summarize(rows)) == 0,
-          "a search the portal answered with no item is not a failure")
+          rows[0]["note"] and PORTAL_NO_ITEM in rows[0]["note"]
+          and len(sn["portal_no_item"]) == 1 and not sn["portal_failed"]
+          and exit_code(sn) == 1
+          and verdict_line(sn).startswith("FAIL: the portal search found no "
+                                          "item for 1 service(s)")
+          and any(l.startswith("portal search found no item: 1.")
+                  for l in describe(sn)),
+          "a search the portal answered with no item marks the row, fails "
+          "the run and says so, rather than a PASS the tool cannot back  "
+          "<-- pinned defect")
+    many_ni = summarize(rows)
+    many_ni["portal_no_item"] = [rows[0]] * 12
+    check(describe(many_ni)[-1] == "  ...and 2 more",
+          "more than ten portal searches that found no item are cut with a "
+          "count")
+    hand = serving(site(services={"X.WeirdServer": bare["X.MapServer"]},
+                        manifests={"X.WeirdServer": bare_manifest["X.MapServer"]}),
+                   lambda: inventory(
+        json_getter("TESTTOKEN"), ROOT,
+        [{"folder": "", "service": "X", "type": "WeirdServer"}],
+        search=portal_searcher(PORTAL, "PORTALTOKEN", REST_ROOT)))
+    check(PORTAL_NO_ITEM not in hand[0]["note"]
+          and exit_code(summarize(hand)) == 0,
+          "a service type with no portal item type is not searched, so it "
+          "is not a miss")
     with_props = site(items={query: "eee55555555555555555555555555555"})
     rows = serving(with_props, lambda: inventory(
         json_getter("TESTTOKEN"), ROOT, [record],
