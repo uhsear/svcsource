@@ -83,10 +83,16 @@ import urllib.request
 # CONFIGURATION. Deliberately not flags. Change here, not at the call site.
 # =============================================================================
 
-# Folders the walk skips. Both hold the services ArcGIS Server publishes for
-# itself, none of which reads your data. Including them puts a page of
-# PublishingTools rows in front of the ones a migration cares about.
-SKIP_FOLDERS = ("System", "Utilities")
+# Folders that hold the services ArcGIS Server publishes for itself, and the
+# service types those are. Esri documents the Utilities folder as
+# "automatically deployed GeometryServer and GPServer services" and the
+# SymbolServer service sits there too. A service in one of these folders that
+# has one of these types is left out of the inventory, because a page of
+# PublishingTools rows would sit in front of the ones a migration cares about.
+# Every other service in those folders is read like any other: a data folder
+# that happens to be named Utilities must not drop out of the inventory.
+SYSTEM_FOLDERS = ("System", "Utilities")
+SYSTEM_TYPES = ("GPServer", "GeometryServer", "SymbolServer")
 
 # Service types that legitimately have no data source at all. A GeometryServer
 # projects coordinates and reads nothing, so an absent manifest is the correct
@@ -127,9 +133,15 @@ REDACTED = "***"
 # first semicolon left the tail of a password that holds one.
 PASSWORD_FIELD = re.compile(
     r"(\b\w*(?:PASSWORD|PWD)\w*\s*=).*?(?=;\s*\w+\s*=|$)", re.I | re.S)
-# token= and secret= in a connection string or a URL query, up to the next
-# ; & quote or white space. A token is a bearer credential while it lives.
-TOKEN_FIELD = re.compile(r"(\b\w*(?:TOKEN|SECRET)\w*\s*=)[^;&\s\"']*", re.I)
+# token= and secret= in a connection string, a URL query or a log line: the
+# key may end in a quote or take a colon, white space may follow the
+# separator, and the value is a quoted string whole or runs to the next ; &
+# quote or white space. A token is a bearer credential while it lives.
+TOKEN_FIELD = re.compile(
+    r"(\b\w*(?:TOKEN|SECRET)\w*[\"']?\s*[=:]\s*)"
+    r"(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^;&\s\"']*)", re.I)
+# user:password@ in the authority of a URL.
+URL_USERINFO = re.compile(r"(://)[^/\s]*@")
 # A key whose name says its value is a credential: everything below it is
 # masked.
 SECRET_KEY = re.compile(r"password|pwd|token|secret", re.I)
@@ -310,8 +322,20 @@ def unreadable_catalog(folder, what):
             % ("folder %s" % folder if folder else "the root folder", what))
 
 
-def catalog_folders(listing, skip=SKIP_FOLDERS, folder=""):
-    """The folders of a catalog listing, minus the ones the walk skips."""
+def system_service(record):
+    """True for a service ArcGIS Server publishes for itself.
+
+    Both parts must hold: a system folder name and a system service type. The
+    folder alone is not enough, because a site can keep data in a folder named
+    Utilities, and a GPServer outside those folders is the operator's own.
+    """
+    folder = record.get("folder", "").strip("/").rpartition("/")[2].lower()
+    return (folder in tuple(f.lower() for f in SYSTEM_FOLDERS)
+            and record.get("type") in SYSTEM_TYPES)
+
+
+def catalog_folders(listing, folder=""):
+    """The folders a catalog listing names."""
     folders = listing.get("folders")
     if folders is None:
         return []
@@ -321,9 +345,7 @@ def catalog_folders(listing, skip=SKIP_FOLDERS, folder=""):
         raise RuntimeError(unreadable_catalog(
             folder, "answered folders as something other than an array of "
             "names"))
-    lowered = tuple(s.lower() for s in skip)
-    return [f for f in folders
-            if f.strip("/") and f.strip("/").lower() not in lowered]
+    return [f for f in folders if f.strip("/")]
 
 
 def parse_conn(text):
@@ -1382,7 +1404,10 @@ def redact(text, *secrets):
             text = "%s" % (secret,)
             out = out.replace(text, REDACTED).replace(
                 urllib.parse.quote_plus(text), REDACTED)
-    return out
+    # What no caller knew to name: a password in the userinfo of --server, or
+    # a token in the query string it carries, comes back in urllib's errors.
+    return TOKEN_FIELD.sub(r"\1" + REDACTED, PASSWORD_FIELD.sub(
+        r"\1" + REDACTED, URL_USERINFO.sub(r"\1" + REDACTED + "@", out)))
 
 
 # ------------------------------------------------------------------ server io
@@ -1532,7 +1557,7 @@ def walk_catalog(get_json, root, max_folders=MAX_FOLDERS):
         listing = get_json("%s/%s" % (base, url_path(folder.strip("/"))))
         records.extend(catalog_records(listing, folder.strip("/")))
         queue.extend(catalog_folders(listing, folder=folder.strip("/")))
-    return records
+    return [r for r in records if not system_service(r)]
 
 
 def portal_searcher(portal, token, public_rest_root, insecure=False,
@@ -2008,14 +2033,25 @@ def self_test():
     check(rows_for_service({"service": "Odd", "type": "MapServer"}, {},
                            {"databases": "nonsense"})[0]["status"] == UNRESOLVED,
           "databases that is not an array is unresolved, not an empty success")
-    check(catalog_folders(root_listing) == ["Transport"],
-          "System and Utilities are not walked")
-    check(catalog_folders({"folders": ["system", "UTILITIES", "Water"]})
-          == ["Water"],
-          "the skipped folder names are matched whatever their case")
-    check(catalog_folders(root_listing, skip=()) ==
-          ["Transport", "System", "Utilities"],
-          "an empty skip list walks every folder")
+    check(catalog_folders(root_listing) == ["Transport", "System", "Utilities"],
+          "System and Utilities are listed, so a data service in one is read"
+          "  <-- pinned defect")
+    sysrec = {"folder": "Utilities", "service": "PrintingTools",
+              "type": "GPServer"}
+    check(system_service(sysrec) and system_service(
+          dict(sysrec, folder="/system/", type="GeometryServer"))
+          and system_service(dict(sysrec, type="SymbolServer")),
+          "a GPServer, GeometryServer or SymbolServer in System or Utilities "
+          "is the site's own, whatever the case of the folder")
+    check(not system_service(dict(sysrec, type="MapServer"))
+          and not system_service(dict(sysrec, type="FeatureServer"))
+          and not system_service(dict(sysrec, folder="Ops"))
+          and not system_service(dict(sysrec, folder=""))
+          and not system_service({"service": "Parcels"}),
+          "a data service in Utilities, or a GPServer outside it, is not "
+          "left out  <-- pinned defect")
+    check(system_service(dict(sysrec, folder="Ops/Utilities")),
+          "the system folder name is matched at its last path segment")
     check(catalog_folders({}) == [] and catalog_folders({"folders": None}) == [],
           "a catalog with no folders reads as none")
     check(catalog_folders({"folders": ["", "/", "Water"]}) == ["Water"],
@@ -2972,6 +3008,24 @@ def self_test():
           == "url?token=***&f=json",
           "a token in the escaped form urlencode gave it is redacted too"
           "  <-- pinned defect")
+    check(redact("https://gis_admin:PW7@h.example/arcgis/x failed")
+          == "https://***@h.example/arcgis/x failed"
+          and redact("https://u:p@ss@h/x") == "https://***@h/x"
+          and "PW7" not in redact("x://a:PW7@h:6443/"),
+          "a password in the userinfo of a url is masked with no secret "
+          "named  <-- pinned defect")
+    check(redact("TOKEN= abc123;x=1") == "TOKEN= ***;x=1"
+          and redact('TOKEN="abc 123" x') == 'TOKEN=*** x'
+          and redact("SECRET='s3 cr3t'") == "SECRET=***"
+          and redact("ACCESS_TOKEN = xyz") == "ACCESS_TOKEN = ***"
+          and redact("token: abc") == "token: ***"
+          and redact('{"token": "abc 1"}') == '{"token": ***}'
+          and redact('TOKEN="abc 123') == "TOKEN=***"
+          and redact("TOKEN='abc 123") == "TOKEN=***"
+          and redact("https://h/x?token=T0K&f=json") == "https://h/x?token=***&f=json",
+          "a token or secret is masked after a space, inside quotes, after a "
+          "colon and in JSON, not only up to the next space  <-- pinned "
+          "defect")
 
     # ---- the site, answered in process. No socket is opened and no credential
     # is real. _opener is swapped for a stand-in that answers the paths an
@@ -3355,6 +3409,24 @@ def self_test():
           in records, "a service in a folder is recorded with its folder")
     check(all("token=TESTTOKEN" in t for t in walked.targets),
           "every catalog call carries the token")
+    mixed = site(folders={
+        "": {"folders": ["Utilities", "System"], "services": []},
+        "Utilities": {"folders": [], "services": [
+            {"serviceName": "Utilities/Parcels", "type": "MapServer"},
+            {"serviceName": "Utilities/Geometry", "type": "GeometryServer"},
+            {"serviceName": "Utilities/Symbols", "type": "SymbolServer"},
+            {"serviceName": "Utilities/PrintingTools", "type": "GPServer"}]},
+        "System": {"folders": [], "services": [
+            {"serviceName": "System/PublishingTools", "type": "GPServer"}]}})
+    kept = serving(mixed, lambda: walk_catalog(json_getter("TESTTOKEN"), ROOT))
+    check(kept == [{"folder": "Utilities", "service": "Parcels",
+                    "type": "MapServer"}],
+          "a data service in a folder named Utilities is walked, and the "
+          "site's own services beside it are not  <-- pinned defect")
+    unread = summarize(rows_for_service(kept[0], {}, {"databases": []}))
+    check(exit_code(unread) == 1 and verdict_line(unread).startswith("FAIL"),
+          "an unreadable service in Utilities fails the run, not PASS"
+          "  <-- pinned defect")
     raises(lambda: serving(site(fail_after=0),
                            lambda: walk_catalog(json_getter("TESTTOKEN"),
                                                 ROOT)),
@@ -3960,6 +4032,24 @@ def self_test():
     check("unresolved data sources: 2" in text, "and says how many")
     check("Parcels.FeatureServer: no manifest reachable" in text,
           "and names each service that could not be resolved")
+
+    for given, hidden in (("https://gis_admin:PWINURL7@gis.example.com/arcgis",
+                           "PWINURL7"),
+                          ("https://gis.example.com/arcgis?token=TOKINQ9",
+                           "TOKINQ9")):
+        code, text = serving(
+            site(open_error=lambda target: urllib.error.URLError(
+                "cannot open " + target)),
+            lambda: run(["--server", given, "--user", "gis_admin"]))
+        check(code == 2 and hidden not in text and "error:" in text,
+              "a credential in the --server url is not echoed in the error "
+              "line  <-- pinned defect")
+    code, text = serving(site(), lambda: run(
+        ["--server", "ftp://u:PWFTP5@h/arcgis", "--user", "u"]))
+    check(code == 64 and "PWFTP5" not in text
+          and "must start with https://" in text,
+          "a bad scheme does not echo the password beside it  <-- pinned "
+          "defect")
 
     code, text = serving(site(fail_after=0),
                          lambda: run(["--server", ROOT, "--user", "gis_admin"]))
@@ -5074,6 +5164,20 @@ def self_test():
     check(written("recycle_start", "02:00") == "02:00"
           and written("recycle_interval", "24") == "24",
           "the recycle columns stay numeric: no apostrophe")
+    readme_row = dict((c, "") for c in COLUMNS)
+    readme_row.update({
+        "service": "Parcels", "type": "FeatureServer",
+        "path": "Parcels.FeatureServer", "status": OK,
+        "dataset": '=HYPERLINK("http://x.test")', "database": "@gisdb",
+        "db_user": "-sdeowner", "source_document": "+C:/x.mxd",
+        "note": "\t=1+1"})
+    check(csv_text([readme_row]).split("\r\n")[1]
+          == (",Parcels,FeatureServer,Parcels.FeatureServer,ok,,,,"
+              "\"'=HYPERLINK(\"\"http://x.test\"\")\",,,'@gisdb,'-sdeowner,,,,"
+              "'+C:/x.mxd,'\t=1+1,,,,"),
+          "the line the README quotes for hostile text is what csv_text "
+          "writes, note and source document in their own columns"
+          "  <-- pinned defect")
     samples = ["", "plain", "=1+1", "'=1+1", "''@x", "+1", "-1", "\t=x",
                "\rx", "'\tx", "'", "''", "a'=b", "=" * 3, "'plain",
                u"\u00e9=", u"=\u00e9"]
@@ -5373,7 +5477,7 @@ def main(argv=None):
             continue
         if not is_http_url(url):
             print("error: %s must start with https:// or http://, got %r."
-                  % (flag, url), file=sys.stderr)
+                  % (flag, redact(url.rpartition("@")[2])), file=sys.stderr)
             return 64
         if url.lower().startswith("http://"):
             # Plain http sends the password and then the token unencrypted,
@@ -5472,7 +5576,8 @@ def main(argv=None):
         # Exit 2 rather than 1. A site that could not be read is a different
         # fact from a site whose data sources could not all be resolved, and
         # only the exit code tells a scheduled job which one happened.
-        print("error: %s" % exc, file=sys.stderr)
+        print("error: %s" % redact(exc, secret, token, portal_secret,
+                                   portal_token), file=sys.stderr)
         return 2
     except Exception as exc:
         # Anything else is a defect in this tool, and it still exits 2. An

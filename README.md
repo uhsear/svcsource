@@ -66,6 +66,11 @@ PASS  a listing with no services key is not a catalog, so it stops the walk rath
 ...
 PASS  a catalog whose service entries are not objects stops the walk with a message, not a traceback  <-- pinned defect
 ...
+PASS  System and Utilities are listed, so a data service in one is read  <-- pinned defect
+PASS  a GPServer, GeometryServer or SymbolServer in System or Utilities is the site's own, whatever the case of the folder
+PASS  a data service in Utilities, or a GPServer outside it, is not left out  <-- pinned defect
+PASS  the system folder name is matched at its last path segment
+...
 PASS  the database name is read
 PASS  sde:sqlserver:HOST reports HOST as the machine
 ...
@@ -146,6 +151,8 @@ PASS  the summary counts services, not rows  <-- pinned defect
 PASS  one unreadable data source fails the run  <-- pinned defect
 ...
 PASS  a token in the escaped form urlencode gave it is redacted too  <-- pinned defect
+PASS  a password in the userinfo of a url is masked with no secret named  <-- pinned defect
+PASS  a token or secret is masked after a space, inside quotes, after a colon and in JSON, not only up to the next space  <-- pinned defect
 PASS  the default opener verifies the certificate against the system trust store  <-- pinned defect
 ...
 PASS  the password is posted, never put in the url  <-- pinned defect
@@ -161,6 +168,8 @@ PASS  and the url urllib quoted back carries no token  <-- pinned defect
 ...
 PASS  the Admin API's status error envelope raises with its code and message  <-- pinned defect
 ...
+PASS  a data service in a folder named Utilities is walked, and the site's own services beside it are not  <-- pinned defect
+PASS  an unreadable service in Utilities fails the run, not PASS  <-- pinned defect
 PASS  a catalog that will not answer raises rather than reporting an empty site  <-- pinned defect
 ...
 PASS  a folder that lists itself is visited once, not for ever
@@ -180,12 +189,6 @@ PASS  a portal that will not answer returns None, which is not a blank ID, rathe
 ...
 PASS  a portal search that failed marks the row, fails the run and says so, rather than reading as a service with no item  <-- pinned defect
 ...
-PASS  a PWD= field, a token= parameter and a key naming a token or secret are masked in the dump  <-- pinned defect
-...
-PASS  a portal whose search is down fails the run from the command line, and the last line says why  <-- pinned defect
-...
-PASS  --aprx-dir that pairs no service fails the run, because a wrong folder cannot be told from a site with no projects  <-- pinned defect
-...
 PASS  a service that knows its own item ID is not searched for
 PASS  and no search call is made at all  <-- pinned defect
 ...
@@ -194,6 +197,7 @@ PASS  a site with no services writes a header and no rows  <-- pinned defect
 ...
 PASS  a saved password in a manifest does not reach the dump on disk  <-- pinned defect
 PASS  a list, a number or an object under a password key is masked too  <-- pinned defect
+PASS  a PWD= field, a token= parameter and a key naming a token or secret are masked in the dump  <-- pinned defect
 ...
 PASS  a password holding a semicolon is masked to the next key, not to the semicolon  <-- pinned defect
 ...
@@ -209,6 +213,9 @@ PASS  --out without --apply writes nothing and says so  <-- pinned defect
 ...
 PASS  no credential reaches the file on disk  <-- pinned defect
 ...
+PASS  a credential in the --server url is not echoed in the error line  <-- pinned defect
+PASS  a credential in the --server url is not echoed in the error line  <-- pinned defect
+PASS  a bad scheme does not echo the password beside it  <-- pinned defect
 PASS  a catalog that cannot be read exits 2, not the gate's 1  <-- pinned defect
 PASS  and no inventory at all is printed  <-- pinned defect
 ...
@@ -221,6 +228,8 @@ PASS  and neither file is touched, because both are built before either is writt
 PASS  an http:// server without --insecure is refused before the password is sent  <-- pinned defect
 PASS  and so is an http:// portal  <-- pinned defect
 PASS  a portal url with no scheme is a usage error too  <-- pinned defect
+...
+PASS  a portal whose search is down fails the run from the command line, and the last line says why  <-- pinned defect
 ...
 PASS  the command line reports the copied locator, exits 3 and does not say PASS  <-- pinned defect
 PASS  and prints the counts the README quotes for this site  <-- pinned defect
@@ -241,11 +250,11 @@ PASS  one participant that cannot be named makes the list UNKNOWN, because a sho
 PASS  while a service that reads its own data in place is not tied to the file it was once published from  <-- pinned defect
 ...
 PASS  a geocode service whose REST resource was unreadable may be a composite, so it is UNKNOWN for every target  <-- pinned defect
+...
+PASS  a locator is unsettled when any service is UNKNOWN, or when nothing matched and geocode services exist  <-- pinned defect
 PASS  an unmatched service is a namesake when its locator has this locator's last segment, with or without .loc, in any case
 PASS  a READS answer is unsettled when another service records a locator of the same name under another path, and settled when the others record different locators  <-- pinned defect
 PASS  --locator names the namesake services when it is unsettled and stays quiet when the others record different locators
-...
-PASS  a locator is unsettled when any service is UNKNOWN, or when nothing matched and geocode services exist  <-- pinned defect
 ...
 PASS  no match with geocode services present is UNSETTLED, names the spelling limit and lists their locator paths, and never says nothing uses the locator  <-- pinned defect
 ...
@@ -257,6 +266,8 @@ PASS  a recorded .mxd, or no recorded path, cannot tell two projects apart  <-- 
 PASS  a service whose own JSON was unreadable says so in its note  <-- pinned defect
 ...
 PASS  the summary prints the AMBIGUOUS note whole, even when a project path holds a semicolon  <-- pinned defect
+...
+PASS  --aprx-dir that pairs no service fails the run, because a wrong folder cannot be told from a site with no projects  <-- pinned defect
 ...
 PASS  a service whose JSON would not answer fails the run and the last line says why  <-- pinned defect
 ...
@@ -282,13 +293,21 @@ PASS  an --aprx-dir that is not a folder is a usage error before any sign-in  <-
 PASS  and with --apply the input inventory is left as it was  <-- pinned defect
 ...
 PASS  a cell starting with equals gets one apostrophe  <-- pinned defect
+...
 PASS  a cell starting with tab gets one apostrophe  <-- pinned defect
 PASS  a cell starting with carriage return gets one apostrophe  <-- pinned defect
+...
 PASS  text that starts with apostrophes and then a trigger gets one more, so the guard can be undone exactly
+...
 PASS  the dataset column is guarded for every trigger, tab and carriage return included  <-- pinned defect
+...
 PASS  the database column is guarded for every trigger, tab and carriage return included  <-- pinned defect
+...
 PASS  the recycle columns stay numeric: no apostrophe
+PASS  the line the README quotes for hostile text is what csv_text writes, note and source document in their own columns  <-- pinned defect
+...
 PASS  a run against a site with trigger text writes every one guarded  <-- pinned defect
+...
 PASS  read_inventory returns what the tool saw, not what it wrote  <-- pinned defect
 PASS  a database that starts with a trigger still groups with the same database in another site's file  <-- pinned defect
 ...
@@ -302,10 +321,10 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-655 assertions, 0 failed
+664 assertions, 0 failed
 ```
 
-The count is 655 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
+The count is 664 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
 
@@ -342,9 +361,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2246      0    496      0   100%
+svcsource.py    2285      0    500      0   100%
 ----------------------------------------------------------
-TOTAL           2246      0    496      0   100%
+TOTAL           2285      0    500      0   100%
 ```
 
 ## Usage
@@ -499,11 +518,12 @@ exits 1.
 Every text cell of the file is text from the site: a dataset label, a database name, a user, a source
 document path, a note. A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a
 carriage return as a formula, and OWASP's CSV injection page lists those characters. So the
-writer puts one apostrophe in front of such a cell. This is the row that a hostile dataset label,
-database, user and source document produce, as written by `csv_text` (the tab shows as `	`):
+writer puts one apostrophe in front of such a cell. This is the line `csv_text` writes when it is given a row with only a hostile dataset label,
+database, user, source document and note set. A real run fills the item ID, server, instance,
+version and capabilities columns too. `<TAB>` stands for a tab character:
 
 ```
-,Parcels,FeatureServer,Parcels.FeatureServer,ok,,,,"'=HYPERLINK(""http://x.test"")",,,'@gisdb,'-sdeowner,,,,'	=1+1,,,02:00,24,
+,Parcels,FeatureServer,Parcels.FeatureServer,ok,,,,"'=HYPERLINK(""http://x.test"")",,,'@gisdb,'-sdeowner,,,,'+C:/x.mxd,'<TAB>=1+1,,,,
 ```
 
 - Every column is guarded except `recycle_start` and `recycle_interval`. The tool builds those
@@ -819,10 +839,17 @@ remembers, which is why somebody ran an inventory.
 ## Limits
 
 - It reads one site. A deployment with several federated servers needs one run per server.
-- `System` and `Utilities` are not walked, and the summary does not say so. They hold the services
-  ArcGIS Server publishes for itself, none of which reads your data. A site that keeps real
-  services in a folder named `Utilities` gets them left out. The skip applies at every depth, so
-  a nested folder with one of those names is skipped too.
+- `System` and `Utilities` are walked, and one kind of service in them is left out: a
+  `GPServer`, `GeometryServer` or `SymbolServer`. Esri's page for the `Utilities` folder lists
+  `GeocodingTools`, `OfflinePackaging`, `PrintingTools` and `RasterUtilities` (GPServer), `Geometry`
+  (GeometryServer) and `Symbols` (SymbolServer)
+  ([Utilities folder](https://developers.arcgis.com/rest/enterprise-administration/server/utilities-folder/)),
+  and those are the services ArcGIS Server publishes for itself. Esri's page does not say what the
+  `System` folder holds, so that rule rests on its `GPServer` services such as `PublishingTools`.
+  Every other service in those two folders is read like any other, so real data in a folder named
+  `Utilities` is inventoried and an unreadable one fails the run. The cost is the reverse case: a
+  geoprocessing service of your own that sits in `System` or `Utilities` is left out, and the
+  summary does not say so. The match is on the last segment of the folder path, in any case.
 - A `GeometryServer` reads nothing, so an absent manifest is the correct answer for it and is
   reported `no-datasource`. Every other type that answers without a manifest is reported
   `unresolved`, which fails the run. That is the safe direction, and it means a cached map service
@@ -904,8 +931,22 @@ remembers, which is why somebody ran an inventory.
 - The token that `generateToken` returns lasts 60 minutes, as the tool asks. A run longer than that,
   or a site that stops answering part way, ends with exit 1 and unread rows, not exit 2. A
   scheduled job cannot tell that from a data source the tool could not resolve.
-- A `--server` or `--portal` URL that carries a token in its query is echoed whole in the error
-  message, like one that carries `user:pass`. Such a URL cannot succeed, so nothing is written.
+- A `--server` or `--portal` URL that carries `user:pass@` in its address or a `token=` in its
+  query is printed in an error with the user name and password replaced by `***` and the token
+  value replaced by `***`. Put the user name in `--user` and the password in the environment all
+  the same.
+- A password given on the command line by mistake, as `--password=hunter2`, is echoed in the
+  usage error `unrecognized arguments: --password=hunter2` that argparse prints, with exit 64. A
+  scheduler log then keeps it. The tool reads the password only from `SVCSOURCE_PASSWORD` or the
+  prompt, so use `SVCSOURCE_PASSWORD`.
+- A folder or service name from the site is appended to the server URL as path text. A hostile name
+  such as `../../x` can address another path on the same host with the token. No other host is ever
+  contacted, because redirects are refused and every URL starts from `--server` or `--portal`.
+- `--dump-manifest` is compared with `--out` but not with the `--recycle-with` files. Under
+  `--apply`, naming an inventory you want to keep as both replaces it with JSON.
+- `recycle_start` and `recycle_interval` are kept safe by validation and not by the apostrophe.
+  `rows_for_service` only ever builds `HH:MM` and whole hours, so no run writes a trigger there,
+  but `csv_text` called directly with `=1` in `recycle_start` would write it as it came.
 - A server's own message text in a `generateToken` failure is echoed to stderr. The password is
   redacted from it. Anything else the server puts there appears as sent.
 - A catalog listing that has a `services` array but no `folders` key is read as having no folders,
@@ -927,15 +968,16 @@ remembers, which is why somebody ran an inventory.
   "this is the database to move", never as "this service works".
 - A manifest can carry the saved password of the connection the service was published from.
   `--dump-manifest` masks every `PASSWORD=`, `PWD=`, `ENCRYPTED_PASSWORD=` and
-  `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=` or `secret=` value up to the
-  next `;`, `&`, quote or space, and every string under a key that contains `password`, `pwd`,
+  `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=`, `token:` or `secret=` value (a
+  quoted value whole, white space after the separator allowed, otherwise up to the next `;`, `&`,
+  quote or space), and every string under a key that contains `password`, `pwd`,
   `token` or `secret`. A password that itself contains `;KEY=` leaks its tail after that point. A
   credential under another name is written as the server sent it. Everything else is written as
   sent, hosts and user names included, so share the dump with care.
 - The secret redaction is a plain string replace. A password of one or two characters also blanks
-  those characters elsewhere in an error message. A url with credentials in it, such as
-  `https://user:pass@host/arcgis`, is echoed whole in the error message. Put the user name in
-  `--user` and the password in the environment.
+  those characters elsewhere in an error message. Error text also has `user:pass@` in a URL and
+  any `password=`, `token=` or `secret=` value masked, whether or not the tool knew that
+  credential.
 - The token travels in the query string of every GET, as the Admin API accepts, so it can appear
   in web adaptor and proxy access logs. Use https, and treat those logs as sensitive.
 - The tool makes two Admin API calls per service, one for the service JSON and one for the
@@ -959,7 +1001,9 @@ remembers, which is why somebody ran an inventory.
   parent folders of the output are created.
 - A long locator path pushes the data source summary out of its columns. The CSV is not affected.
 - On Windows, the password prompt waits at the console. A scheduled job must set
-  `SVCSOURCE_PASSWORD`, or the run waits for a password that nobody types.
+  `SVCSOURCE_PASSWORD`, or the run waits for a password that nobody types. The prompt reads the
+  console and not standard input, so `echo pw | python svcsource.py ...` and `< /dev/null` both
+  hang with no output under Git Bash.
 - `--insecure` skips certificate verification and exists for sites behind an internal CA. It is
   off by default. Add the CA to your trust store instead.
 
