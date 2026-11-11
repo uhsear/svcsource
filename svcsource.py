@@ -155,6 +155,14 @@ PARTICIPANTS_UNKNOWN = "UNKNOWN"
 RECYCLE_COLUMNS = ("path", "server", "database", "recycle_start",
                    "recycle_interval")
 
+# A text cell starting with one of these can run as a formula in a
+# spreadsheet. See cell().
+FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
+
+# Columns the tool builds itself as HH:MM or whole hours, and which are read
+# back as numbers. They are never guarded, so they stay numeric.
+NORMALISED_COLUMNS = ("recycle_start", "recycle_interval")
+
 # The Admin API search that lists the folders registered with the site. Only
 # asked for once per run, and only when a locator-backed service needs it.
 FIND_ITEMS = "/admin/data/findItems"
@@ -1570,8 +1578,40 @@ def find_projects(top, walk=os.walk):
     return sorted(found)
 
 
+def cell(value):
+    """A CSV text cell that a spreadsheet will not run as a formula.
+
+    A cell that starts with =, +, -, @, tab or carriage return can run as a
+    formula when somebody opens the file. Text that starts with these comes
+    from the site: a dataset label, a database name, a note that quotes a
+    path. One apostrophe is put in front, as OWASP's CSV injection page
+    advises. In a CSV that Excel opens the apostrophe stays visible, and the
+    cell no longer starts with a trigger.
+
+    A value that already begins with apostrophes and then a trigger gets one
+    more, so that uncell() can take exactly one off and return what was
+    written. Anything that is not text is left as it is.
+    """
+    if (isinstance(value, str)
+            and value.lstrip("'")[:1] in FORMULA_STARTS):
+        return "'" + value
+    return value
+
+
+def uncell(value):
+    """What cell() was given. The one apostrophe it added is taken off."""
+    if (isinstance(value, str) and value[:1] == "'"
+            and value.lstrip("'")[:1] in FORMULA_STARTS):
+        return value[1:]
+    return value
+
+
 def read_inventory(path):
-    """The rows of an inventory CSV this tool wrote, for --recycle-with."""
+    """The rows of an inventory CSV this tool wrote, for --recycle-with.
+
+    The guard cell() added is taken off again, so a database name that starts
+    with a trigger character still groups with the same name on this site.
+    """
     try:
         with io.open(path, encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -1581,7 +1621,8 @@ def read_inventory(path):
                 raise RuntimeError(
                     "%s is not an inventory this version wrote: it has no %s "
                     "column" % (path, ", ".join(missing)))
-            return list(reader)
+            return [dict((k, uncell(v)) for k, v in row.items())
+                    for row in reader]
     except (IOError, OSError, UnicodeDecodeError, csv.Error) as exc:
         raise RuntimeError("%s could not be read: %s" % (path, exc))
 
@@ -1592,6 +1633,11 @@ def csv_text(rows):
     A site with nothing on it produces a file with one header line, not an
     empty file. An empty file is indistinguishable from a run that died, and
     the difference matters when the file is the cutover evidence.
+
+    Every text column goes through cell(), so a dataset, database, user,
+    source document or note that starts with a formula character is not run
+    by a spreadsheet. The two recycle columns are built by this tool as HH:MM
+    and whole hours and are not guarded.
     """
     # newline="" is not decoration. Without it the csv module's carriage return
     # meets the one the text layer adds on Windows, and every other line of the
@@ -1601,7 +1647,9 @@ def csv_text(rows):
                             extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow(dict((c, row.get(c, "")) for c in COLUMNS))
+        writer.writerow(dict(
+            (c, row.get(c, "") if c in NORMALISED_COLUMNS
+             else cell(row.get(c, ""))) for c in COLUMNS))
     return handle.getvalue()
 
 
@@ -4749,6 +4797,119 @@ def self_test():
           and "Traceback" not in text,
           "a --recycle-with CSV from an older version exits 2 with a "
           "message")
+
+    # ---- formula injection: a text cell that starts with = + - @ tab or CR
+    # is prefixed with one apostrophe on write, and read_inventory takes
+    # exactly that apostrophe off again
+    trigger_names = (("=", "equals"), ("+", "plus"), ("-", "minus"),
+                     ("@", "at sign"), ("\t", "tab"), ("\r", "carriage "
+                                                             "return"))
+    check(FORMULA_STARTS == tuple(t for t, _n in trigger_names),
+          "the guard covers =, +, -, @, tab and carriage return, and nothing "
+          "else")
+    for trigger, name in trigger_names:
+        check(cell(trigger + "x") == "'" + trigger + "x",
+              "a cell starting with %s gets one apostrophe  <-- pinned "
+              "defect" % name)
+    check(cell("Parcels") == "Parcels" and cell("") == ""
+          and cell("a=b") == "a=b" and cell("x-") == "x-"
+          and cell(" =x") == " =x" and cell("'plain") == "'plain"
+          and cell("'") == "'",
+          "text that does not start with a trigger is written as it is")
+    check(cell(5) == 5 and cell(None) is None,
+          "a value that is not text is left alone")
+    check(cell("'=x") == "''=x" and cell("''-x") == "'''-x",
+          "text that starts with apostrophes and then a trigger gets one "
+          "more, so the guard can be undone exactly")
+
+    def written(column, value):
+        parsed = list(csv.reader(io.StringIO(csv_text([{column: value}]),
+                                             newline="")))
+        return parsed[1][list(COLUMNS).index(column)]
+
+    guarded = [c for c in COLUMNS if c not in NORMALISED_COLUMNS]
+    check(guarded == ["folder", "service", "type", "path", "status",
+                      "source_item_id", "all_item_ids", "by_reference",
+                      "dataset", "server", "instance", "database",
+                      "db_user", "version", "capabilities", "extensions",
+                      "source_document", "note", "participants", "aprx"],
+          "every column but the two the tool builds as numbers is guarded")
+    for column in guarded:
+        check(all(written(column, t + "v") == "'" + t + "v"
+                  for t, _n in trigger_names),
+              "the %s column is guarded for every trigger, tab and "
+              "carriage return included  <-- pinned defect" % column)
+    check(written("recycle_start", "02:00") == "02:00"
+          and written("recycle_interval", "24") == "24",
+          "the recycle columns stay numeric: no apostrophe")
+    samples = ["", "plain", "=1+1", "'=1+1", "''@x", "+1", "-1", "\t=x",
+               "\rx", "'\tx", "'", "''", "a'=b", "=" * 3, "'plain",
+               u"\u00e9=", u"=\u00e9"]
+    check(all(uncell(cell(s)) == s for s in samples),
+          "every sample string comes back exactly from cell then uncell"
+          "  <-- pinned defect")
+    check(uncell("'plain") == "'plain" and uncell("'") == "'"
+          and uncell("=x") == "=x" and uncell(None) is None,
+          "uncell takes off only an apostrophe that guards a trigger")
+
+    hostile_manifests = dict(SITE_MANIFESTS)
+    hostile_manifests["Parcels.FeatureServer"] = {
+        "databases": [{
+            "byReference": True,
+            "onServerConnectionString":
+                "SERVER=DBHOST1;INSTANCE=sde:sqlserver:DBHOST1;"
+                "DATABASE=@gisdb;USER=-sdeowner;VERSION=sde.DEFAULT",
+            "datasets": [{"onServerName": "=HYPERLINK(\"http://x.test\")"}]}],
+        "resources": [{"onPremisePath": "\t=1+1"}]}
+    hostile_services = dict(SITE_SERVICES)
+    hostile_services["Parcels.FeatureServer"] = dict(
+        SITE_SERVICES["Parcels.FeatureServer"],
+        recycleStartTime="02:00", recycleInterval=24)
+    hostile_csv = os.path.join(tmp, "hostile.csv")
+    code, text = serving(
+        site(services=hostile_services, manifests=hostile_manifests),
+        lambda: run(["--server", ROOT, "--user", "gis_admin", "--apply",
+                     "--out", hostile_csv]))
+    with io.open(hostile_csv, encoding="utf-8", newline="") as handle:
+        hostile_rows = [r for r in csv.DictReader(handle)
+                        if r["service"] == "Parcels"]
+    check(code == 0 and len(hostile_rows) == 1
+          and hostile_rows[0]["dataset"] == "'=HYPERLINK(\"http://x.test\")"
+          and hostile_rows[0]["database"] == "'@gisdb"
+          and hostile_rows[0]["db_user"] == "'-sdeowner"
+          and hostile_rows[0]["source_document"] == "'\t=1+1",
+          "a run against a site with trigger text writes every one guarded"
+          "  <-- pinned defect")
+    check(hostile_rows[0]["server"] == "DBHOST1"
+          and hostile_rows[0]["recycle_start"] == "02:00"
+          and hostile_rows[0]["recycle_interval"] == "24",
+          "and the cells that start with no trigger are untouched")
+    back_hostile = [r for r in read_inventory(hostile_csv)
+                    if r["service"] == "Parcels"][0]
+    check(back_hostile["dataset"] == "=HYPERLINK(\"http://x.test\")"
+          and back_hostile["database"] == "@gisdb"
+          and back_hostile["db_user"] == "-sdeowner"
+          and back_hostile["source_document"] == "\t=1+1",
+          "read_inventory returns what the tool saw, not what it wrote"
+          "  <-- pinned defect")
+    code, text = serving(
+        site(services=hostile_services, manifests=hostile_manifests),
+        lambda: run(["--server", ROOT, "--user", "gis_admin",
+                     "--recycle-with", hostile_csv]))
+    check(code == 0 and "recycle skew risk: 1 geodatabase minute(s)" in text
+          and "@gisdb" in text and "'@gisdb" not in text,
+          "a database that starts with a trigger still groups with the same "
+          "database in another site's file  <-- pinned defect")
+    ragged_csv = os.path.join(tmp, "ragged.csv")
+    with io.open(ragged_csv, "w", newline="") as handle:
+        handle.write(",".join(RECYCLE_COLUMNS) + "\r\n"
+                     "'=a,H\r\n'=b,H,g,00:00,1,extra\r\n'plain,H,'g,,\r\n")
+    ragged = read_inventory(ragged_csv)
+    check(ragged[0]["path"] == "=a" and ragged[0]["database"] is None
+          and ragged[1]["path"] == "=b" and ragged[1][None] == ["extra"]
+          and ragged[2]["path"] == "'plain" and ragged[2]["database"] == "'g",
+          "a short or long row is read without a crash, and an apostrophe "
+          "that guards nothing is kept")
 
     pdir = os.path.join(tmp, "pro")
     for rel in ("a/Parcels.aprx", "b; c/Roads.aprx", "d/Roads.aprx"):

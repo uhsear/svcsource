@@ -267,6 +267,17 @@ PASS  the same --recycle-with file twice is a usage error before any sign-in  <-
 PASS  an --aprx-dir that is not a folder is a usage error before any sign-in  <-- pinned defect
 PASS  and with --apply the input inventory is left as it was  <-- pinned defect
 ...
+PASS  a cell starting with equals gets one apostrophe  <-- pinned defect
+PASS  a cell starting with tab gets one apostrophe  <-- pinned defect
+PASS  a cell starting with carriage return gets one apostrophe  <-- pinned defect
+PASS  text that starts with apostrophes and then a trigger gets one more, so the guard can be undone exactly
+PASS  the dataset column is guarded for every trigger, tab and carriage return included  <-- pinned defect
+PASS  the database column is guarded for every trigger, tab and carriage return included  <-- pinned defect
+PASS  the recycle columns stay numeric: no apostrophe
+PASS  a run against a site with trigger text writes every one guarded  <-- pinned defect
+PASS  read_inventory returns what the tool saw, not what it wrote  <-- pinned defect
+PASS  a database that starts with a trigger still groups with the same database in another site's file  <-- pinned defect
+...
 PASS  --aprx-dir pairs the service it can and refuses the one that two projects match, with exit 4  <-- pinned defect
 ...
 PASS  two inventories of one unchanged site are identical, and a service that really moved shows in the diff: a batch that reported success and changed nothing leaves the CSV as it was
@@ -277,10 +288,10 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-602 assertions, 0 failed
+641 assertions, 0 failed
 ```
 
-The count is 602 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12. Every run prints the same lines.
+The count is 641 on Windows with Python 3.13 and 3.9, and on Linux with Python 3.12. Python 3.12 on Windows was not run for this count. Every run prints the same lines.
 
 ## Requirements
 
@@ -313,9 +324,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2142      0    472      0   100%
+svcsource.py    2189      0    480      0   100%
 ----------------------------------------------------------
-TOTAL           2142      0    472      0   100%
+TOTAL           2189      0    480      0   100%
 ```
 
 ## Usage
@@ -464,6 +475,39 @@ A service whose own JSON would not answer is not dropped, and it does not pass. 
 capabilities and its recycle time are blank, which looks the same as a service with no portal item.
 So the row's note says the JSON could not be read, the summary lists the service, and the run
 exits 1.
+
+## The CSV is safe to open in a spreadsheet
+
+Every cell of the file is text from the site: a dataset label, a database name, a user, a source
+document path, a note. A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a
+carriage return as a formula, and OWASP's CSV injection page lists those characters. So the
+writer puts one apostrophe in front of such a cell. This is the row that a hostile dataset label,
+database, user and source document produce, as written by `csv_text` (the tab shows as `	`):
+
+```
+,Parcels,FeatureServer,Parcels.FeatureServer,ok,,,,"'=HYPERLINK(""http://x.test"")",,,'@gisdb,'-sdeowner,,,,'	=1+1,,,02:00,24,
+```
+
+- Every column is guarded except `recycle_start` and `recycle_interval`. The tool builds those
+  itself as `HH:MM` and whole hours, and they stay numeric.
+- A value that already begins with apostrophes and then a trigger gets one more apostrophe, so the
+  guard can be undone exactly. `--recycle-with` reads an inventory back through that undo, so a
+  database named `@gisdb` in another site's file still groups with `@gisdb` on this site. A
+  database that does not start with a trigger is read as it was written.
+- OWASP's mitigation is the single quote prefix. It adds that these techniques are "not reliable
+  in Microsoft Excel after saving and re-opening the CSV file", and in a CSV that Excel opens
+  directly the apostrophe stays visible. The guard makes sure the cell does not start with a
+  trigger. It does not hide itself. Read the file with a script, not with a spreadsheet, and the
+  apostrophe is the only change.
+- OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. This tool guards
+  the six characters the portfolio guards and does not guard those.
+- An inventory written by an earlier version has no guard. Reading it back changes a cell only
+  when it starts with an apostrophe and then a trigger.
+
+Sources: OWASP, CSV Injection, https://owasp.org/www-community/attacks/CSV_Injection. Microsoft's
+page on stopping Excel from converting numbers to dates says an apostrophe typed before an entry is
+not displayed in the cell. It describes typing into a cell, not a CSV import, which is why the
+guard above is tested for what the file holds and not for what Excel shows.
 
 ## Geocode services: copy or reference
 
@@ -804,8 +848,9 @@ remembers, which is why somebody ran an inventory.
   `projects:` line.
 - The `AMBIGUOUS` and `NOT FOUND` notes put your absolute project paths into the CSV and the
   console, and the paths mix `/` and `\` on Windows. Do not paste that output into a public issue.
-- A cell in the CSV (a dataset or a database name, a note) is written as the server sent it. A
-  value that starts with `=`, `+`, `-` or `@` is read by Excel as a formula.
+- A text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading
+  apostrophe in the CSV, and Excel shows it. A cell that starts with a line feed or a full-width
+  `=`, `+`, `-` or `@` is not guarded. See "The CSV is safe to open in a spreadsheet".
 - A participant name that contains `|` is split in two in the `participants` column, because `|`
   is the separator.
 - The manifest is what the server recorded at publish time. A service republished by hand against
