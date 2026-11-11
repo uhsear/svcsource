@@ -291,7 +291,7 @@ PASS  importing the module defines main and runs nothing
 641 assertions, 0 failed
 ```
 
-The count is 641 on Windows with Python 3.13 and 3.9, and on Linux with Python 3.12. Python 3.12 on Windows was not run for this count. Every run prints the same lines.
+The count is 641 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12 and 3.9. Every run prints the same lines.
 
 ## Requirements
 
@@ -476,7 +476,7 @@ capabilities and its recycle time are blank, which looks the same as a service w
 So the row's note says the JSON could not be read, the summary lists the service, and the run
 exits 1.
 
-## The CSV is safe to open in a spreadsheet
+## The CSV guards formula-starting cells
 
 Every cell of the file is text from the site: a dataset label, a database name, a user, a source
 document path, a note. A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a
@@ -494,20 +494,28 @@ database, user and source document produce, as written by `csv_text` (the tab sh
   guard can be undone exactly. `--recycle-with` reads an inventory back through that undo, so a
   database named `@gisdb` in another site's file still groups with `@gisdb` on this site. A
   database that does not start with a trigger is read as it was written.
-- OWASP's mitigation is the single quote prefix. It adds that these techniques are "not reliable
-  in Microsoft Excel after saving and re-opening the CSV file", and in a CSV that Excel opens
-  directly the apostrophe stays visible. The guard makes sure the cell does not start with a
-  trigger. It does not hide itself. Read the file with a script, not with a spreadsheet, and the
-  apostrophe is the only change.
-- OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. This tool guards
-  the six characters the portfolio guards and does not guard those.
+- The single quote prefix is one of the techniques OWASP lists. OWASP also says that these
+  techniques are "not reliable in Microsoft Excel after saving and re-opening the CSV file", and
+  that no sanitization strategy is safe for every spreadsheet and every downstream reader. For
+  Excel it recommends a different mitigation: a tab character inside the quoted field. This tool
+  does not use that, because the tab stays in the data and a script that reads the CSV back would
+  have to strip it. This tool also does not claim what Excel shows for the apostrophe: no test
+  opens the file in a spreadsheet. The guard makes sure the cell does not start with a trigger
+  character. Read the file with a script, and the apostrophe is the only change.
+- OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`, and it says that
+  checking only the first character is not enough, because a field separator or a quote inside a
+  value can start a new cell. This tool guards the six characters the portfolio guards and nothing
+  else.
 - An inventory written by an earlier version has no guard. Reading it back changes a cell only
   when it starts with an apostrophe and then a trigger.
 
-Sources: OWASP, CSV Injection, https://owasp.org/www-community/attacks/CSV_Injection. Microsoft's
-page on stopping Excel from converting numbers to dates says an apostrophe typed before an entry is
-not displayed in the cell. It describes typing into a cell, not a CSV import, which is why the
-guard above is tested for what the file holds and not for what Excel shows.
+Sources: OWASP, CSV Injection, https://owasp.org/www-community/attacks/CSV_Injection (it now
+redirects to https://community.owasp.org/attacks/CSV_Injection). Microsoft's page on stopping Excel
+from converting numbers to dates,
+https://support.microsoft.com/en-us/office/stop-automatically-changing-numbers-to-dates-452bd2db-cc96-47d1-81e4-72cec11c4ed8,
+says an apostrophe typed before an entry is not displayed in the cell. That page describes typing
+into a cell, not opening a CSV, so it does not say what Excel shows for an apostrophe inside a CSV.
+The guard is tested for what the file holds, not for what a spreadsheet shows.
 
 ## Geocode services: copy or reference
 
@@ -849,8 +857,23 @@ remembers, which is why somebody ran an inventory.
 - The `AMBIGUOUS` and `NOT FOUND` notes put your absolute project paths into the CSV and the
   console, and the paths mix `/` and `\` on Windows. Do not paste that output into a public issue.
 - A text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading
-  apostrophe in the CSV, and Excel shows it. A cell that starts with a line feed or a full-width
-  `=`, `+`, `-` or `@` is not guarded. See "The CSV is safe to open in a spreadsheet".
+  apostrophe in the CSV. What a spreadsheet shows for that apostrophe is not tested. A cell that
+  starts with a line feed or a full-width `=`, `+`, `-` or `@` is not guarded. See "The CSV guards
+  formula-starting cells".
+- The guard protects only the first character of a cell. A text cell with a space, or other
+  leading white space, before a trigger character is written as it came. A comma-separated payload
+  or a quote inside a value is not guarded either.
+- A text cell that really starts with an apostrophe and then a trigger, such as a database named
+  `'=x` in an inventory written before the guard existed, is read back with one apostrophe removed.
+- A service or folder name that contains a non-ASCII character cannot be requested, so its row
+  reads "service JSON could not be read" and the run exits 1.
+- The token that `generateToken` returns lasts 60 minutes, as the tool asks. A run longer than that,
+  or a site that stops answering part way, ends with exit 1 and unread rows, not exit 2. A
+  scheduled job cannot tell that from a data source the tool could not resolve.
+- A `--server` or `--portal` URL that carries a token in its query is echoed whole in the error
+  message, like one that carries `user:pass`. Such a URL cannot succeed, so nothing is written.
+- A server's own message text in a `generateToken` failure is echoed to stderr. The password is
+  redacted from it. Anything else the server puts there appears as sent.
 - A participant name that contains `|` is split in two in the `participants` column, because `|`
   is the separator.
 - The manifest is what the server recorded at publish time. A service republished by hand against
@@ -863,7 +886,8 @@ remembers, which is why somebody ran an inventory.
   "this is the database to move", never as "this service works".
 - A manifest can carry the saved password of the connection the service was published from.
   `--dump-manifest` masks every `PASSWORD=`, `ENCRYPTED_PASSWORD=` and `ENCRYPTED_PASSWORD_UTF8=`
-  field in every string, and every string under a key that contains `password`. A `PWD=` field, a
+  field in every string, and every string under a key that contains `password`. A password that
+  itself contains `;KEY=` leaks its tail after that point. A `PWD=` field, a
   key named `token`, or a `?token=` query string in a manifest string is written as the server sent
   it. Everything else is written as sent, hosts and user names included, so share the dump with
   care.
@@ -886,7 +910,9 @@ remembers, which is why somebody ran an inventory.
 - It changes nothing, on the server, in the portal or in the folders it reads. The only calls it
   makes are `generateToken`, `admin/services`, the service manifest, `admin/data/findItems`,
   `sharing/rest/search` and `<root>/rest/services/<Folder>/<Name>/GeocodeServer`. The only files it
-  writes are `--out` and `--dump-manifest`, and only with `--apply`.
+  writes are `--out` and `--dump-manifest`, and only with `--apply`. Under `--apply` a temporary
+  `<path>.partial` file is written next to each output and removed after the replace, and missing
+  parent folders of the output are created.
 - A long locator path pushes the data source summary out of its columns. The CSV is not affected.
 - On Windows, the password prompt waits at the console. A scheduled job must set
   `SVCSOURCE_PASSWORD`, or the run waits for a password that nobody types.

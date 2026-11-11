@@ -1321,7 +1321,7 @@ def redact(text, *secrets):
 def _opener(insecure):
     """Build a urllib opener, optionally without certificate verification.
 
-    Verification is on. The harvested version of this script disabled it at
+    Verification is on. An earlier version of this script disabled it at
     import time for an internal self-signed certificate, which is a sensible
     thing to do on one site and an indefensible default in a published tool:
     the flag makes the decision visible in the command that made it.
@@ -5154,7 +5154,7 @@ def main(argv=None):
             print("warning: %s is plain http. The password and the token "
                   "cross the network unencrypted." % flag, file=sys.stderr)
     if not args.user:
-        # No default administrator name. The harvested version defaulted to the
+        # No default administrator name. An earlier version defaulted to the
         # one this site happened to use, which is a fact about that site and
         # not about ArcGIS Server.
         print("error: --user is required. It is the ArcGIS Server "
