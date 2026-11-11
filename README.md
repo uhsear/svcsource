@@ -152,6 +152,8 @@ PASS  one unreadable data source fails the run  <-- pinned defect
 ...
 PASS  a token in the escaped form urlencode gave it is redacted too  <-- pinned defect
 PASS  a password in the userinfo of a url is masked with no secret named  <-- pinned defect
+PASS  the word after generateToken: is blanked, as the README Limits say
+PASS  a colon form, a JSON snippet in a string, PASSWD= and a passwd or credential key are not masked, as the README Limits say
 PASS  a token or secret is masked after a space, inside quotes, after a colon and in JSON, not only up to the next space  <-- pinned defect
 PASS  the default opener verifies the certificate against the system trust store  <-- pinned defect
 ...
@@ -187,6 +189,8 @@ PASS  a non-ASCII folder, and a service name holding a space or #, are read, and
 ...
 PASS  a portal that will not answer returns None, which is not a blank ID, rather than stopping the inventory  <-- pinned defect
 ...
+PASS  a double quote in a service name goes into the portal query as it is, which the README Limits say
+...
 PASS  a portal search that failed marks the row, fails the run and says so, rather than reading as a service with no item  <-- pinned defect
 ...
 PASS  a service that knows its own item ID is not searched for
@@ -209,15 +213,33 @@ PASS  --apply is off by default, so nothing is written  <-- pinned defect
 PASS  --insecure is off by default, so certificates are verified  <-- pinned defect
 PASS  --dump-manifest is off by default, so no raw manifest is written  <-- pinned defect
 ...
+PASS  a password typed on the command line as --password is not echoed in the usage error, which still exits 64  <-- pinned defect
+...
+PASS  a password typed on the command line as -p is not echoed in the usage error, which still exits 64  <-- pinned defect
+PASS  a password typed on the command line as --pwd is not echoed in the usage error, which still exits 64  <-- pinned defect
+PASS  a password typed on the command line as --apply is not echoed in the usage error, which still exits 64  <-- pinned defect
+PASS  a password typed on the command line as --timeout is not echoed in the usage error, which still exits 64  <-- pinned defect
+...
+PASS  a password typed on the command line as hunter2 is not echoed in the usage error, which still exits 64  <-- pinned defect
+PASS  an unknown flag is not quoted back, and the error says where the password goes
+PASS  a quoted value in any other usage error is masked
+...
 PASS  --out without --apply writes nothing and says so  <-- pinned defect
 ...
 PASS  no credential reaches the file on disk  <-- pinned defect
 ...
+PASS  a service name with an escape sequence is printed as sent, which the README Limits say
+...
 PASS  a credential in the --server url is not echoed in the error line  <-- pinned defect
-PASS  a credential in the --server url is not echoed in the error line  <-- pinned defect
+PASS  a --server url with user:password@ is refused with 64 before any call, and the password is not echoed  <-- pinned defect
+...
+PASS  a --portal url with user:password@ is refused with 64 before any call, and the password is not echoed  <-- pinned defect
+PASS  only an @ in the authority counts as user information, not one in the path, the query or the fragment
 PASS  a bad scheme does not echo the password beside it  <-- pinned defect
 PASS  a catalog that cannot be read exits 2, not the gate's 1  <-- pinned defect
 PASS  and no inventory at all is printed  <-- pinned defect
+...
+PASS  a valid empty catalog is trusted: PASS, exit 0 and a header-only file, as the README Limits say
 ...
 PASS  a run with no --user is a usage error  <-- pinned defect
 ...
@@ -285,6 +307,7 @@ PASS  a geocode service whose REST resource could not be read leaves the --locat
 PASS  an empty --locator is a usage error, not a clean answer  <-- pinned defect
 ...
 PASS  two inventories with the same file name are two sites, told apart by their paths  <-- pinned defect
+PASS  a password in the --server address never reaches the recycle skew site label  <-- pinned defect
 ...
 PASS  a --recycle-with that is not a file is a usage error before any sign-in  <-- pinned defect
 PASS  an --out that is also a --recycle-with input is a usage error before any sign-in  <-- pinned defect
@@ -296,6 +319,8 @@ PASS  a cell starting with equals gets one apostrophe  <-- pinned defect
 ...
 PASS  a cell starting with tab gets one apostrophe  <-- pinned defect
 PASS  a cell starting with carriage return gets one apostrophe  <-- pinned defect
+...
+PASS  a byte-order mark before a trigger is not guarded, as the README Limits say
 ...
 PASS  text that starts with apostrophes and then a trigger gets one more, so the guard can be undone exactly
 ...
@@ -321,10 +346,13 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-664 assertions, 0 failed
+686 assertions, 0 failed
 ```
 
-The count is 664 on Windows with Python 3.13, 3.12 and 3.9, and on Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
+The block above is an excerpt. Each `...` line stands for omitted `PASS` lines, every line shown is
+verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
+prints 686 assertions in all. The count is 686 on Windows with Python 3.13, 3.12 and 3.9, and on
+Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
 
@@ -349,7 +377,9 @@ socket are exercised too. Nothing leaves the machine.
 
 The sample outputs further down are not printed by `--self-test`. I made them by running the tool
 against a local stand-in site, built like the self-test's `http.server` one, with synthetic
-service names, and pasting what it printed.
+service names, and pasting what it printed. That stand-in site is not one of the four shipped files, so
+you cannot reproduce these samples from the repository alone. The self-test is the part you can
+run.
 
 Branch coverage of the self-test is 100%:
 
@@ -361,9 +391,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2285      0    500      0   100%
+svcsource.py    2329      0    510      0   100%
 ----------------------------------------------------------
-TOTAL           2285      0    500      0   100%
+TOTAL           2329      0    510      0   100%
 ```
 
 ## Usage
@@ -427,7 +457,13 @@ machine, and it lands in shell history and in scheduler logs. The password comes
 `SVCSOURCE_PASSWORD`, or from `SVCSOURCE_PORTAL_PASSWORD` for the portal, or from an unechoed
 prompt. No credential reaches the CSV, and every error message is stripped of the password and the
 token before it is printed, because `generateToken` is a POST that urllib repeats in some of its
-exceptions and a token travels as a query parameter in a url urllib quotes back.
+exceptions and a token travels as a query parameter in a url urllib quotes back. A password typed
+on the command line by mistake, as `--password=hunter2`, is not echoed in the usage error: the
+error says that an argument was not recognised and does not print it, and any quoted value in
+another usage error is shown as `'***'`. A `--server` or `--portal` address that carries
+`user:password@` is refused with exit 64 before any call. urllib cannot open such an address, and
+through an http proxy it can, which would put the password in the site name that the summary
+prints.
 
 ## What it reports
 
@@ -931,14 +967,42 @@ remembers, which is why somebody ran an inventory.
 - The token that `generateToken` returns lasts 60 minutes, as the tool asks. A run longer than that,
   or a site that stops answering part way, ends with exit 1 and unread rows, not exit 2. A
   scheduled job cannot tell that from a data source the tool could not resolve.
-- A `--server` or `--portal` URL that carries `user:pass@` in its address or a `token=` in its
-  query is printed in an error with the user name and password replaced by `***` and the token
-  value replaced by `***`. Put the user name in `--user` and the password in the environment all
-  the same.
-- A password given on the command line by mistake, as `--password=hunter2`, is echoed in the
-  usage error `unrecognized arguments: --password=hunter2` that argparse prints, with exit 64. A
-  scheduler log then keeps it. The tool reads the password only from `SVCSOURCE_PASSWORD` or the
-  prompt, so use `SVCSOURCE_PASSWORD`.
+- A `--server` or `--portal` URL that carries a `token=` in its query is printed in an error with
+  the token value replaced by `***`. One that carries `user:pass@` is refused with exit 64, and
+  the refusal does not print it.
+- A password typed on the command line is not echoed by the tool, but it is still in your shell
+  history and in the process list while the command runs. The tool reads the password only from
+  `SVCSOURCE_PASSWORD` or the prompt, so use `SVCSOURCE_PASSWORD`.
+- A cell that starts with a byte-order mark and then a trigger, such as `U+FEFF` and `=`, is not
+  guarded, because the first character is the mark.
+- The end-to-end hostile-site test checks the `dataset`, `database`, `db_user` and
+  `source_document` columns through a real run. The `note` and `aprx` columns are pinned only
+  through `csv_text`, where every column is pinned for every trigger.
+- A failed write under `--apply` exits 2, which is also the code for a site that could not be read.
+  A scheduled job cannot tell a full disk from a site outage by the code alone. Read the message.
+- With `--apply` and `--dump-manifest`, the two files are replaced one after the other. If the
+  second write fails, `--out` has already been replaced, and the run exits 2 with "could not
+  write".
+- The portal item search puts the folder and service name into a quoted query string with no
+  escaping. A name that holds a double quote changes the query and gives a wrong or missing item
+  ID. Such a name is rare.
+- The secret masks work on the text. `--dump-manifest` masks `PASSWORD=` style fields, but a
+  `Password: x` written with a colon, and a `"password": "x"` JSON snippet inside a string value,
+  are written as the server sent them. A key such as `passwd` or `credential` is not masked
+  either.
+- The masks also blank harmless words in error text. `generateToken: 400 Unable to generate token`
+  prints as `generateToken: *** Unable to generate token`, because the word after
+  `generateToken:` reads as a token value. The HTTP code is lost from that line, and
+  `generateToken: <urlopen error ...>` prints with `***` for `<urlopen`.
+- A service, folder or database name from the site is printed to the console as sent, so a name
+  with terminal escape sequences can change what your terminal shows. The CSV and the dump are not
+  affected. Console output is not stripped of control characters.
+- An empty catalog, `{"services": [], "folders": []}`, is trusted. It passes with exit 0, and under
+  `--apply` it replaces the last good inventory with a header-only file. A real empty site and an
+  empty answer from a broken proxy look the same. The self-test pins this as the design.
+- `urllib` honours `HTTP_PROXY` and `HTTPS_PROXY` from the environment, and the tool does not
+  change that. With an `http://` server and `--insecure`, the password and the token go to the
+  proxy in clear text. Proxy settings apply to every call.
 - A folder or service name from the site is appended to the server URL as path text. A hostile name
   such as `../../x` can address another path on the same host with the token. No other host is ever
   contacted, because redirects are refused and every URL starts from `--server` or `--portal`.

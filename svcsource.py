@@ -254,6 +254,18 @@ def is_http_url(url):
     return bool(url) and url.lower().startswith(("http://", "https://"))
 
 
+def has_userinfo(url):
+    """True when the authority of a url carries user:password@.
+
+    urllib cannot open such a url: it reads the host as "user:password@host"
+    and fails with an error that quotes the password back. Through an http
+    proxy the same url can succeed, and then the password would reach every
+    line that prints the site. So the url is refused before anything uses it.
+    """
+    authority = re.split(r"[/?#]", url.split("://", 1)[-1], maxsplit=1)[0]
+    return "@" in authority
+
+
 def service_path(folder, service, typ):
     """The Admin API path of one service: Folder/Name.Type, or Name.Type."""
     name = (service or "").strip("/")
@@ -3014,6 +3026,22 @@ def self_test():
           and "PW7" not in redact("x://a:PW7@h:6443/"),
           "a password in the userinfo of a url is masked with no secret "
           "named  <-- pinned defect")
+    check(redact("https://h/arcgis/admin/generateToken: 400 Unable to "
+                 "generate token")
+          == "https://h/arcgis/admin/generateToken: *** Unable to generate "
+             "token"
+          and redact("generateToken: <urlopen error timed out>")
+          == "generateToken: *** error timed out>",
+          "the word after generateToken: is blanked, as the README Limits "
+          "say")
+    check(mask_passwords({"a": "Password: hunter2", "b": '{"password": "x"}',
+                          "c": "PASSWD=hunter2;USER=u"})
+          == {"a": "Password: hunter2", "b": '{"password": "x"}',
+              "c": "PASSWD=hunter2;USER=u"}
+          and mask_passwords({"passwd": "hunter2", "credential": "x"})
+          == {"passwd": "hunter2", "credential": "x"},
+          "a colon form, a JSON snippet in a string, PASSWD= and a passwd or "
+          "credential key are not masked, as the README Limits say")
     check(redact("TOKEN= abc123;x=1") == "TOKEN= ***;x=1"
           and redact('TOKEN="abc 123" x') == 'TOKEN=*** x'
           and redact("SECRET='s3 cr3t'") == "SECRET=***"
@@ -3663,6 +3691,14 @@ def self_test():
                                          "type": "WeirdServer"})) == "",
           "a service type the portal has no item type for is not searched")
 
+    quoted = {"folder": "", "service": 'A"B', "type": "FeatureServer"}
+    quoted_query = ('type:"Feature Service" AND url:"%s/A"B/FeatureServer"'
+                    % REST_ROOT)
+    check(serving(site(items={quoted_query: "f" * 32}),
+                  lambda: search(quoted)) == "f" * 32,
+          "a double quote in a service name goes into the portal query as it "
+          "is, which the README Limits say")
+
     class OddPortal(Site):
         """A portal whose search answers results in some other shape."""
 
@@ -3961,6 +3997,32 @@ def self_test():
     check(usage_code(["--server", ROOT, "--user", "u", "--ap"]) == 64,
           "a unique prefix of --apply is refused, not read as --apply, so a "
           "truncated write flag cannot write  <-- pinned defect")
+    def usage_text(argv):
+        """What _parse prints to stderr when it stops on a usage error."""
+        console = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(console):
+                _parse(argv)
+        except SystemExit:
+            pass
+        return console.getvalue()
+    for typed in (["--password=hunter2"], ["--password", "hunter2"],
+                  ["-p", "hunter2"], ["--pwd=hunter2"],
+                  ["--apply=hunter2"], ["--timeout", "hunter2"],
+                  ["--timeout=hunter2"], ["hunter2", "hunter2"]):
+        shown = usage_text(["--server", ROOT, "--user", "u"] + typed)
+        check("hunter2" not in shown and "error:" in shown
+              and usage_code(["--server", ROOT, "--user", "u"] + typed) == 64,
+              "a password typed on the command line as %s is not echoed in "
+              "the usage error, which still exits 64  <-- pinned defect"
+              % typed[0].split("=")[0])
+    check("--nonexistent-flag" not in usage_text(["--nonexistent-flag"])
+          and "SVCSOURCE_PASSWORD" in usage_text(["--nonexistent-flag"]),
+          "an unknown flag is not quoted back, and the error says where the "
+          "password goes")
+    check("'***'" in usage_text(["--server", ROOT, "--user", "u", "--timeout",
+                                 "abc"]),
+          "a quoted value in any other usage error is masked")
     check(_parse([ROOT, "--user", "u"]).server == ROOT,
           "the server may be given positionally, for a script tool")
     check(_parse([ROOT, "--server", "https://other/arcgis", "--user", "u"]
@@ -4026,6 +4088,14 @@ def self_test():
     check(not os.path.exists(os.path.join(tmp, "never.json")),
           "and writes nothing  <-- pinned defect")
 
+    code, text = serving(
+        site(folders={"": {"folders": [], "services": [
+            {"serviceName": "Bad\x1b[31mName", "type": "FeatureServer"}]}},
+             manifests={}),
+        lambda: run(["--server", ROOT, "--user", "gis_admin"]))
+    check("Bad\x1b[31mName" in text,
+          "a service name with an escape sequence is printed as sent, which "
+          "the README Limits say")
     code, text = serving(site(manifests={}),
                          lambda: run(["--server", ROOT, "--user", "gis_admin"]))
     check(code == 1, "a site with an unreadable data source exits 1")
@@ -4033,10 +4103,8 @@ def self_test():
     check("Parcels.FeatureServer: no manifest reachable" in text,
           "and names each service that could not be resolved")
 
-    for given, hidden in (("https://gis_admin:PWINURL7@gis.example.com/arcgis",
-                           "PWINURL7"),
-                          ("https://gis.example.com/arcgis?token=TOKINQ9",
-                           "TOKINQ9")):
+    for given, hidden in (("https://gis.example.com/arcgis?token=TOKINQ9",
+                           "TOKINQ9"),):
         code, text = serving(
             site(open_error=lambda target: urllib.error.URLError(
                 "cannot open " + target)),
@@ -4044,6 +4112,38 @@ def self_test():
         check(code == 2 and hidden not in text and "error:" in text,
               "a credential in the --server url is not echoed in the error "
               "line  <-- pinned defect")
+    # A user:password@ address cannot be opened by urllib, which reads it as
+    # a host and quotes the password back in InvalidURL. Through an http proxy
+    # it can succeed and then the site label printed it. Refused up front.
+    for flag, given, hidden in (
+            ("--server", "https://gis_admin:PWINURL7@gis.example.com/arcgis",
+             "PWINURL7"),
+            ("--server", "https://gisadmin:PW9@gis.example.com/arcgis",
+             "PW9"),
+            ("--server", "https://u:p@ss@gis.example.com/arcgis", "p@ss"),
+            ("--server", "https://onlyuser@gis.example.com/arcgis",
+             "onlyuser"),
+            ("--portal", "https://pu:PWPORTAL3@portal.example.com/portal",
+             "PWPORTAL3")):
+        argv = ["--server", given if flag == "--server" else ROOT,
+                "--user", "gis_admin", "--insecure", "--apply",
+                "--out", os.path.join(tmp, "userinfo.csv")]
+        if flag == "--portal":
+            argv += ["--portal", given, "--public-rest-root", REST_ROOT]
+        code, text = serving(site(), lambda: run(argv))
+        check(code == 64 and hidden not in text
+              and "must not carry a user name or password" in text
+              and not os.path.exists(os.path.join(tmp, "userinfo.csv")),
+              "a %s url with user:password@ is refused with 64 before any "
+              "call, and the password is not echoed  <-- pinned defect"
+              % flag)
+    check(not has_userinfo("https://h/arcgis?email=a@b.example")
+          and not has_userinfo("https://h/a@b")
+          and not has_userinfo("https://h:6443/arcgis#x@y")
+          and has_userinfo("https://u:p@h/arcgis")
+          and has_userinfo("https://u@h?x=1"),
+          "only an @ in the authority counts as user information, not one in "
+          "the path, the query or the fragment")
     code, text = serving(site(), lambda: run(
         ["--server", "ftp://u:PWFTP5@h/arcgis", "--user", "u"]))
     check(code == 64 and "PWFTP5" not in text
@@ -4064,6 +4164,15 @@ def self_test():
           and "not an ArcGIS catalog" in text,
           "an empty object where the catalog belongs exits 2, not a clean "
           "empty site  <-- pinned defect")
+    empty_csv = os.path.join(tmp, "empty_catalog.csv")
+    code, text = serving(site(folders={"": {"folders": [], "services": []}}),
+                         lambda: run(["--server", ROOT, "--user", "gis_admin",
+                                      "--apply", "--out", empty_csv]))
+    with io.open(empty_csv, encoding="utf-8") as handle:
+        empty_lines = handle.read().splitlines()
+    check(code == 0 and "PASS" in text and len(empty_lines) == 1,
+          "a valid empty catalog is trusted: PASS, exit 0 and a header-only "
+          "file, as the README Limits say")
     os.environ[SECRET_ENV] = "wrong"
     code, text = serving(site(), lambda: run(["--server", ROOT, "--user",
                                               "gis_admin"]))
@@ -5071,6 +5180,12 @@ def self_test():
           and sib_b in text,
           "two inventories with the same file name are two sites, told "
           "apart by their paths  <-- pinned defect")
+    code, text = serving(site(services=ctx), lambda: run(
+        ["--server", "https://bob:PWRECYCLE8@gis.example.com/arcgis",
+         "--user", "gis_admin", "--insecure", "--recycle-with", sib_a]))
+    check(code == 64 and "PWRECYCLE8" not in text and "recycle skew" not in text,
+          "a password in the --server address never reaches the recycle skew "
+          "site label  <-- pinned defect")
     sib_c = os.path.join(tmp, "other_name.csv")
     replace_file(sib_c, csv_text([inv("Roads.MapServer", "DBHOST1", "gisdb",
                                       "04:00")]))
@@ -5138,6 +5253,9 @@ def self_test():
           and cell(" =x") == " =x" and cell("'plain") == "'plain"
           and cell("'") == "'",
           "text that does not start with a trigger is written as it is")
+    check(cell("\ufeff=x") == "\ufeff=x",
+          "a byte-order mark before a trigger is not guarded, as the README "
+          "Limits say")
     check(cell(5) == 5 and cell(None) is None,
           "a value that is not text is left alone")
     check(cell("'=x") == "''=x" and cell("''-x") == "'''-x",
@@ -5380,6 +5498,14 @@ class UsageParser(argparse.ArgumentParser):
     """
 
     def error(self, message):
+        # argparse quotes the offending argument back, and a password typed
+        # as --password=VALUE is that argument. A scheduler log would keep it.
+        if message.startswith("unrecognized arguments:"):
+            message = ("unrecognized arguments. Their text is not shown, "
+                       "because one of them may be a password. The password "
+                       "comes from %s." % SECRET_ENV)
+        else:
+            message = re.sub(r"'[^']*'", "'***'", message)
         self.print_usage(sys.stderr)
         self.exit(64, "%s: error: %s\n" % (self.prog, message))
 
@@ -5478,6 +5604,11 @@ def main(argv=None):
         if not is_http_url(url):
             print("error: %s must start with https:// or http://, got %r."
                   % (flag, redact(url.rpartition("@")[2])), file=sys.stderr)
+            return 64
+        if has_userinfo(url):
+            print("error: %s must not carry a user name or password in its "
+                  "address. Give the user name as --user and the password in "
+                  "%s." % (flag, SECRET_ENV), file=sys.stderr)
             return 64
         if url.lower().startswith("http://"):
             # Plain http sends the password and then the token unencrypted,
