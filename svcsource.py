@@ -146,7 +146,7 @@ TOKEN_FIELD = re.compile(
     r"\w*[\"']?\s*[=:]\s*)"
     r"(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^;&\s\"']*)", re.I)
 # user:password@ in the authority of a URL.
-URL_USERINFO = re.compile(r"(://)[^/\s]*@")
+URL_USERINFO = re.compile(r"(://)[^\s?#]*@")
 # A key whose name says its value is a credential: everything below it is
 # masked.
 SECRET_KEY = re.compile(
@@ -298,8 +298,10 @@ def has_userinfo(url):
     proxy the same url can succeed, and then the password would reach every
     line that prints the site. So the url is refused before anything uses it.
     """
-    authority = re.split(r"[/?#]", url.split("://", 1)[-1], maxsplit=1)[0]
-    return "@" in authority
+    # Cut at the first ? or #, not the first /: a password may hold a /, and an
+    # @ in a path is refused with it, which is the safe direction.
+    before_query = re.split(r"[?#]", url.split("://", 1)[-1], maxsplit=1)[0]
+    return "@" in before_query
 
 
 def service_path(folder, service, typ):
@@ -4224,6 +4226,13 @@ def self_test():
               "a password typed on the command line as %s is not echoed in "
               "the usage error, which still exits 64  <-- pinned defect"
               % typed[0].split("=")[0])
+    for typed in (["--timeout", "pa'ss w0rd"], ["--timeout=pa'ss w0rd"],
+                  ["--apply=pa'ss w0rd"], ["--timeout", "pa'ss\"w0rd"]):
+        shown = usage_text(["--server", ROOT, "--user", "u"] + typed)
+        check("w0rd" not in shown and "pa" not in shown.split("error:")[-1]
+              and "error:" in shown,
+              "a password with an apostrophe typed as %s is not echoed in "
+              "the usage error  <-- pinned defect" % typed[0].split("=")[0])
     check("--nonexistent-flag" not in usage_text(["--nonexistent-flag"])
           and "SVCSOURCE_PASSWORD" in usage_text(["--nonexistent-flag"]),
           "an unknown flag is not quoted back, and the error says where the "
@@ -4346,12 +4355,23 @@ def self_test():
               "call, and the password is not echoed  <-- pinned defect"
               % flag)
     check(not has_userinfo("https://h/arcgis?email=a@b.example")
-          and not has_userinfo("https://h/a@b")
           and not has_userinfo("https://h:6443/arcgis#x@y")
+          and has_userinfo("https://adm:Pa/ss9@h/arcgis")
+          and has_userinfo("https://h/a@b")
           and has_userinfo("https://u:p@h/arcgis")
           and has_userinfo("https://u@h?x=1"),
-          "only an @ in the authority counts as user information, not one in "
-          "the path, the query or the fragment")
+          "an @ before the first ? or # counts as user information, so a "
+          "password holding a / is refused too; one in the query or the "
+          "fragment does not  <-- pinned defect")
+    code, text = serving(site(), lambda: run(
+        ["--server", "https://adm:PWSLASH6/x@h/arcgis", "--user", "u"]))
+    check(code == 64 and "PWSLASH6" not in text
+          and "must not carry a user name or password" in text,
+          "a --server password holding a / is refused with 64 and not "
+          "echoed  <-- pinned defect")
+    check("PWSLASH7" not in redact("bad port in https://adm:PWSLASH7/x@h/a")
+          and "@h/a" in redact("bad port in https://adm:PWSLASH7/x@h/a"),
+          "redact masks a userinfo password that holds a /  <-- pinned defect")
     code, text = serving(site(), lambda: run(
         ["--server", "ftp://u:PWFTP5@h/arcgis", "--user", "u"]))
     check(code == 64 and "PWFTP5" not in text
@@ -5713,7 +5733,11 @@ class UsageParser(argparse.ArgumentParser):
                        "because one of them may be a password. The password "
                        "comes from %s." % SECRET_ENV)
         else:
-            message = re.sub(r"'[^']*'", "'***'", message)
+            # argparse repr()s the value: single quotes, or double quotes when
+            # the value holds an apostrophe, with a backslash before any quote
+            # of the outer kind.
+            message = re.sub(r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\"""",
+                             "'***'", message)
         self.print_usage(sys.stderr)
         self.exit(64, "%s: error: %s\n" % (self.prog, message))
 

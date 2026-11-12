@@ -353,12 +353,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-696 assertions, 0 failed
+702 assertions, 0 failed
 ```
 
 The block above is an excerpt. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 696 assertions in all. The count is 696 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 702 assertions in all. The count is 702 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -367,7 +367,7 @@ Python 3.9 or newer. Standard library only: `urllib`, `json`, `os`, `posixpath`,
 `io`, `re`, `csv`, `argparse`, `getpass`, and `contextlib`, `tempfile`, `shutil`, `threading`,
 `http.server` and `runpy` in the self-test. It runs on
 a plain `python3` and passed its self-test under the Python of an ArcGIS Pro conda environment
-(3.13.7), but not under the interpreter that ships inside a Pro install. `arcpy` is not used and the `arcgis` package is not
+(3.13.7) and under the Python that ships inside a Pro install (also 3.13.7). `arcpy` is not used and the `arcgis` package is not
 needed, so it runs on a server, on a laptop with no Pro licence, and in a scheduled job.
 
 ```
@@ -468,8 +468,10 @@ token before it is printed, because `generateToken` is a POST that urllib repeat
 exceptions and a token travels as a query parameter in a url urllib quotes back. A password typed
 on the command line by mistake, as `--password=hunter2`, is not echoed in the usage error: the
 error says that an argument was not recognised and does not print it, and any quoted value in
-another usage error is shown as `'***'`. A `--server` or `--portal` address that carries
-`user:password@` is refused with exit 64 before any call. urllib cannot open such an address, and
+another usage error is shown as `'***'`, including a value that holds an apostrophe, which argparse
+quotes with double quotes. A `--server` or `--portal` address with an `@` before its first `?` or `#`
+is refused with exit 64 before any call. That covers `user:password@`, also when the password holds
+a `/`. urllib cannot open such an address, and
 through an http proxy it can, which would put the password in the site name that the summary
 prints.
 
@@ -1088,6 +1090,16 @@ remembers, which is why somebody ran an inventory.
   hang with no output under Git Bash.
 - `--insecure` skips certificate verification and exists for sites behind an internal CA. It is
   off by default. Add the CA to your trust store instead.
+- The sample run with `--recycle-with`, `--locator` and `--aprx-dir` together is not part of the
+  self-test. Each flag is tested on its own.
+- An `@` in the path of `--server` or `--portal` is refused as if it were user information. Such a url is unusual, and refusing it is the safe
+  direction.
+- A secret placed in `--server` as `?key=` or `;jsessionid=` is echoed in a connection error. Only
+  `token=`, password forms and `user:pass@` are masked there.
+- The masks use regular expressions that can run slowly on a multi-megabyte value made of repeated
+  `PASS` or `TOKEN` text with no `=`. No manifest does that.
+- `--self-test` writes temporary files under the system temp directory and removes them. It
+  writes nothing in the repository.
 
 ## Contributing
 
