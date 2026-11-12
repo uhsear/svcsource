@@ -1364,8 +1364,10 @@ def aprx_none_paired(summary):
 
 def exit_code(summary):
     """1 when any data source, service JSON, --portal search or --locator
-    answer was not settled, or a --portal search found no item, or --aprx-dir paired no service at all, else 4 when --aprx-dir found a service that two projects match,
-    else 3 when a geocode service serves a copied locator, else 0.
+    answer was not settled, or a --portal search found no item, or
+    --aprx-dir paired no service at all, else 4 when --aprx-dir found a
+    service that two projects match, else 3 when a geocode service serves a
+    copied locator, else 0.
 
     AMBIGUOUS is a refusal: the pairing a republish needs was not made, so
     it outranks the copied locator, which is a finding about a pairing that
@@ -4190,7 +4192,7 @@ def self_test():
     for flag, given, hidden in (
             ("--server", "https://gis_admin:PWINURL7@gis.example.com/arcgis",
              "PWINURL7"),
-            ("--server", "https://gisadmin:PW9@gis.example.com/arcgis",
+            ("--server", "https://svc_user:PW9@gis.example.com/arcgis",
              "PW9"),
             ("--server", "https://u:p@ss@gis.example.com/arcgis", "p@ss"),
             ("--server", "https://onlyuser@gis.example.com/arcgis",

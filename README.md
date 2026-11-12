@@ -153,7 +153,7 @@ PASS  one unreadable data source fails the run  <-- pinned defect
 PASS  a token in the escaped form urlencode gave it is redacted too  <-- pinned defect
 PASS  a password in the userinfo of a url is masked with no secret named  <-- pinned defect
 PASS  the word after generateToken: is blanked, as the README Limits say
-PASS  a colon form, a JSON snippet in a string, PASSWD= and a passwd or credential key are not masked, as the README Limits say
+PASS  a colon form, a JSON snippet in a string, PASSWD=, PASS=, CREDENTIAL= and a passwd, pass or credential key are masked  <-- pinned defect
 PASS  a token or secret is masked after a space, inside quotes, after a colon and in JSON, not only up to the next space  <-- pinned defect
 PASS  the default opener verifies the certificate against the system trust store  <-- pinned defect
 ...
@@ -346,12 +346,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-686 assertions, 0 failed
+689 assertions, 0 failed
 ```
 
 The block above is an excerpt. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 686 assertions in all. The count is 686 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 689 assertions in all. The count is 689 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -359,7 +359,8 @@ Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the sa
 Python 3.9 or newer. Standard library only: `urllib`, `json`, `os`, `posixpath`, `sys`, `ssl`,
 `io`, `re`, `csv`, `argparse`, `getpass`, and `contextlib`, `tempfile`, `shutil`, `threading`,
 `http.server` and `runpy` in the self-test. It runs on
-ArcGIS Pro's Python and on a plain `python3`. `arcpy` is not used and the `arcgis` package is not
+a plain `python3` and passed its self-test under the Python of an ArcGIS Pro conda environment
+(3.13.7), but not under the interpreter that ships inside a Pro install. `arcpy` is not used and the `arcgis` package is not
 needed, so it runs on a server, on a laptop with no Pro licence, and in a scheduled job.
 
 ```
@@ -391,9 +392,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2329      0    510      0   100%
+svcsource.py    2348      0    520      0   100%
 ----------------------------------------------------------
-TOTAL           2329      0    510      0   100%
+TOTAL           2348      0    520      0   100%
 ```
 
 ## Usage
@@ -578,8 +579,8 @@ version and capabilities columns too. `<TAB>` stands for a tab character:
   character. Read the file with a script, and the apostrophe is the only change.
 - OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`, and it says that
   checking only the first character is not enough, because a field separator or a quote inside a
-  value can start a new cell. This tool guards the six characters the portfolio guards and nothing
-  else.
+  value can start a new cell. This tool guards those six characters (`=`, `+`, `-`, `@`, tab and CR) and
+  nothing else.
 - An inventory written by an earlier version has no guard. Reading it back changes a cell only
   when it starts with an apostrophe and then a trigger.
 
@@ -860,7 +861,7 @@ reports the ID matching the service's own type and lists all of them in the colu
 | Code | Meaning |
 |---|---|
 | 0 | Every data source was read, and no geocode service serves a copied locator. |
-| 1 | A data source or a service's own JSON could not be read, a `--portal` search did not answer, a `--locator` target could not be settled, or `--aprx-dir` paired no service at all and found no ambiguity. The inventory is incomplete. |
+| 1 | A data source or a service's own JSON could not be read, a `--portal` search did not answer or found no item, a `--locator` target could not be settled, or `--aprx-dir` paired no service at all and found no ambiguity. The inventory is incomplete. |
 | 2 | The site could not be read, a local input (`--recycle-with`, `--aprx-dir`) could not be read, or a file could not be written. No inventory is given. |
 | 3 | Every data source was read, and at least one geocode service serves a copied locator. |
 | 4 | Every data source was read, and `--aprx-dir` found a service that two or more projects match. |
@@ -986,10 +987,10 @@ remembers, which is why somebody ran an inventory.
 - The portal item search puts the folder and service name into a quoted query string with no
   escaping. A name that holds a double quote changes the query and gives a wrong or missing item
   ID. Such a name is rare.
-- The secret masks work on the text. `--dump-manifest` masks `PASSWORD=` style fields, but a
-  `Password: x` written with a colon, and a `"password": "x"` JSON snippet inside a string value,
-  are written as the server sent them. A key such as `passwd` or `credential` is not masked
-  either.
+- The secret masks work on the text and on key names. `--dump-manifest` masks only fields and
+  keys whose names contain `pass`, `pwd`, `credential`, `token` or `secret`, so a password in a
+  URL, under a `PW=` field, or under an API-key name (`apiKey`) is written as the server sent
+  it. A `Bearer ...` string is written as sent too.
 - The masks also blank harmless words in error text. `generateToken: 400 Unable to generate token`
   prints as `generateToken: *** Unable to generate token`, because the word after
   `generateToken:` reads as a token value. The HTTP code is lost from that line, and
@@ -1016,8 +1017,9 @@ remembers, which is why somebody ran an inventory.
 - A catalog listing that has a `services` array but no `folders` key is read as having no folders,
   so a proxy that strips that key makes the inventory incomplete without a warning. A real
   ArcGIS Server always sends the key.
-- `--dump-manifest` does not mask `PASSWD=` or `PASS=` fields in a connection string. It masks
-  `PASSWORD=`, `PWD=` and `ENCRYPTED_PASSWORD=` only.
+- The summary counts unread, failed and no-item services by searching the note text, so a
+  service name or manifest key that repeats one of those phrases can change the counts.
+- A `--recycle-with` file with a cell longer than 128 KB is refused with exit 2.
 - Under `--apply` an existing file named `<out>.partial` next to the output is overwritten, even if
   you made it.
 - A participant name that contains `|` is split in two in the `participants` column, because `|`
@@ -1031,11 +1033,11 @@ remembers, which is why somebody ran an inventory.
   and getting features back, which is a different tool and a different call. Read an `ok` row as
   "this is the database to move", never as "this service works".
 - A manifest can carry the saved password of the connection the service was published from.
-  `--dump-manifest` masks every `PASSWORD=`, `PWD=`, `ENCRYPTED_PASSWORD=` and
-  `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=`, `token:` or `secret=` value (a
-  quoted value whole, white space after the separator allowed, otherwise up to the next `;`, `&`,
-  quote or space), and every string under a key that contains `password`, `pwd`,
-  `token` or `secret`. A password that itself contains `;KEY=` leaks its tail after that point. A
+  `--dump-manifest` masks every `PASSWORD=`, `PASSWD=`, `PASS=`, `PWD=`, `CREDENTIAL=`,
+  `ENCRYPTED_PASSWORD=` and `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=`,
+  `token:`, `secret=` or `password:` value (a quoted value whole, white space after the separator
+  allowed, otherwise up to the next `;`, `&`, quote or space), and every value under a key that
+  contains `pass`, `pwd`, `credential`, `token` or `secret`. A password that itself contains `;KEY=` leaks its tail after that point. A
   credential under another name is written as the server sent it. Everything else is written as
   sent, hosts and user names included, so share the dump with care.
 - The secret redaction is a plain string replace. A password of one or two characters also blanks
@@ -1049,8 +1051,10 @@ remembers, which is why somebody ran an inventory.
   takes as long as that sounds. `--timeout` is per call.
 - The portal fallback matches on the url the portal item recorded, which is not always the url the
   server reports: a web adaptor, a reverse proxy and a direct `:6443` all spell the same service
-  differently. A search the portal answers with no item leaves the ID blank and the run passes. A
-  search that does not answer, or answers something that is not a result list, adds the note
+  differently. A search the portal answers with no item leaves the ID blank, adds the note
+  "portal search found no item", lists the service in the summary and exits 1, because the tool
+  cannot tell a service published outside the portal from an item recorded under another spelling
+  of the url. A search that does not answer, or answers something that is not a result list, adds the note
   "portal search failed" to the row, lists the service in the summary and exits 1. It does not
   stop the run.
 - It does not compare two sites. Run it against the old site and the new one and diff the two CSVs
@@ -1085,7 +1089,7 @@ MIT.
 
 ## Related
 
-Other single-file tools in this portfolio that pair with this one:
+Other single-file tools by the same author that pair with this one:
 
 - [svcdrift](https://github.com/uhsear/svcdrift) - the schema half: what a service was published with against what the dataset holds now
 - [ghostsvc](https://github.com/uhsear/ghostsvc) - the services on the site that no portal item accounts for
