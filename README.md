@@ -66,7 +66,7 @@ PASS  a listing with no services key is not a catalog, so it stops the walk rath
 ...
 PASS  a catalog whose service entries are not objects stops the walk with a message, not a traceback  <-- pinned defect
 ...
-PASS  System and Utilities are listed, so a data service in one is read  <-- pinned defect
+PASS  system and Utilities are listed, so a data service in one is read  <-- pinned defect
 PASS  a GPServer, GeometryServer or SymbolServer in System or Utilities is the site's own, whatever the case of the folder
 PASS  a data service in Utilities, or a GPServer outside it, is not left out  <-- pinned defect
 PASS  the system folder name is matched at its last path segment
@@ -353,12 +353,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-702 assertions, 0 failed
+705 assertions, 0 failed
 ```
 
 The block above is an excerpt of the real run, not the whole output. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 702 assertions in all. The count is 702 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 705 assertions in all. The count is 705 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -399,9 +399,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2402      0    538      0   100%
+svcsource.py    2405      0    540      0   100%
 ----------------------------------------------------------
-TOTAL           2402      0    538      0   100%
+TOTAL           2405      0    540      0   100%
 ```
 
 ## Usage
@@ -1007,8 +1007,8 @@ remembers, which is why somebody ran an inventory.
   name.
 - The same name-only masking applies to error text. A password in a `--server` query under any
   key other than pass, pwd, token, secret, credential, api key or access key is printed in the
-  generateToken error. A value typed in the server position that is not a url, such as
-  `svcsource.py --user a hunter2`, is echoed back in the usage error as `got 'hunter2'`.
+  generateToken error. A `--server` or `--portal` value that is not an http(s) url is not
+  printed at all, so a password typed in that position stays out of the log.
 - The masks also blank harmless words in error text. `generateToken: 400 Unable to generate token`
   prints as `generateToken: *** Unable to generate token`, because the word after
   `generateToken:` reads as a token value. The HTTP code is lost from that line, and
@@ -1121,6 +1121,41 @@ remembers, which is why somebody ran an inventory.
   server's own, which errs toward review.
 - The coverage run was done on Windows with Python 3.13.2. The `coverage` module is not installed
   on the Linux host, so no Linux coverage figure is claimed.
+- Masking in error text is partial in four rare cases. An unquoted value with a space after a
+  `token`, `api_key`, `password` or `credential` key keeps the text after the space. A quoted
+  secret that holds an escaped quote keeps the text after that quote. A password that holds `;word=`
+  keeps its tail. An unquoted token that holds a quote keeps the text after the quote. The tool
+  masks its own password and token exactly, so these only matter for a secret it did not hold.
+- The secret masks use backtracking patterns. A hostile server message packed with `://` makes
+  error masking slow, about 12 seconds for 80 KB. A normal message is instant.
+- `--dump-manifest` keys each manifest by the service path. A service whose path holds `pass`,
+  `pwd`, `token`, `secret`, `credential`, `api key` or `access key`, such as `Compass`, has its whole
+  manifest written as `***`. That errs toward hiding.
+- The credential-free CSV claim rests on `parse_conn` keeping only five connection-string keys. Text
+  in `dataset`, `source_document`, `database` or `note` is written as the site sent it. The
+  password and token masks run on the dump and on error text only, so a password that a site puts
+  in one of those fields would reach the CSV.
+- `--public-rest-root` is not checked for a user name or password in its address. Its text goes
+  into the portal search query, so a password typed there reaches the portal and is never masked.
+- `.gitignore` does not list `services_inventory.csv` or a `--dump-manifest` file. Running the tool
+  inside a clone and then `git add .` can commit an inventory with real host, database and account
+  names.
+- `--timeout` is a socket timeout for each blocking read, not a limit on a whole call. A server that
+  sends one byte at a time can hold a call open, and a response is read with no size cap.
+- If stdout is closed after the files are written, as in `| head -1`, Python exits 120 with
+  `Exception ignored on flushing sys.stdout`. That code is not one of the documented exit codes.
+  The CSV is already on disk.
+- On Windows, a run with the inventory open in Excel makes `os.replace` fail. The run exits 2 with
+  `PermissionError` and keeps the old file, the same code as an unreadable site.
+- The sample outputs come from a stand-in site that is not shipped. The self-test's own geocode
+  site has no REST resource, so its CSV rows carry `participants=UNKNOWN`, while the README rows
+  show it blank.
+- The Esri pages in "The sources" load (HTTP 200). Only the recycle, locators and manifest pages
+  were re-read on 2026-10-13. The statements about Manager, Pro, the ArcGIS API for Python and the
+  analyzers, and the two GitHub projects, are not exercised by the self-test. The GitHub search is
+  dated 2026-10-13 and may be stale.
+- A connection-refused error prints as `generateToken: *** error [WinError 10061] ...>`, because
+  the mask blanks `<urlopen`. No credential shows, and the exit code is 2 with no file written.
 - `--self-test` writes temporary files under the system temp directory and removes them. It
   writes nothing in the repository.
 

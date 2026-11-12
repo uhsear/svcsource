@@ -2142,7 +2142,7 @@ def self_test():
                            {"databases": "nonsense"})[0]["status"] == UNRESOLVED,
           "databases that is not an array is unresolved, not an empty success")
     check(catalog_folders(root_listing) == ["Transport", "System", "Utilities"],
-          "System and Utilities are listed, so a data service in one is read"
+          "system and Utilities are listed, so a data service in one is read"
           "  <-- pinned defect")
     sysrec = {"folder": "Utilities", "service": "PrintingTools",
               "type": "GPServer"}
@@ -2625,9 +2625,9 @@ def self_test():
     check(not path_within("D:\\loc\\..\\copies\\Address", "D:\\loc"),
           "a path that climbs out with .. is not within it  <-- pinned defect")
     check(path_within("d:\\LOC\\Address", "D:\\loc"),
-          "Windows paths match whatever their case")
+          "windows paths match whatever their case")
     check(not path_within("/srv/LOC/Address", "/srv/loc"),
-          "POSIX paths do not, because Linux folders are case sensitive")
+          "posix paths do not, because Linux folders are case sensitive")
     check(path_within("\\\\fileserver\\loc\\Address", "//fileserver/loc"),
           "a UNC path matches its forward-slash spelling")
     check(path_within("/srv/loc", "/"),
@@ -3557,7 +3557,7 @@ def self_test():
     check(len(records) == 3,
           "the walk finds the root services and the ones in folders")
     check({r["service"] for r in records} == {"Parcels", "Geometry", "Roads"},
-          "System is not walked, so PublishingTools is not in the inventory")
+          "system is not walked, so PublishingTools is not in the inventory")
     check({"folder": "Transport", "service": "Roads", "type": "MapServer"}
           in records, "a service in a folder is recorded with its folder")
     check(all("token=TESTTOKEN" in t for t in walked.targets),
@@ -4378,6 +4378,16 @@ def self_test():
           and "must start with https://" in text,
           "a bad scheme does not echo the password beside it  <-- pinned "
           "defect")
+    for bad_flag, bad_args, bad_secret in (
+            ("--server", ["--server", "gis_admin:Hunter2NOECHO"], "Hunter2NOECHO"),
+            ("--server", ["--server", "ftp://gis:Secr@tPWNOECHO"], "tPWNOECHO"),
+            ("--portal", ["--server", ROOT, "--portal",
+                          "gis:Hunter2NOECHO"], "Hunter2NOECHO")):
+        code, text = serving(site(), lambda: run(bad_args + ["--user", "u"]))
+        check(code == 64 and bad_secret not in text
+              and "%s must start with https://" % bad_flag in text,
+              "a rejected %s value is never printed, a bare word or a "
+              "password holding @  <-- pinned defect" % bad_flag)
 
     code, text = serving(site(fail_after=0),
                          lambda: run(["--server", ROOT, "--user", "gis_admin"]))
@@ -5834,8 +5844,11 @@ def main(argv=None):
         if not url:
             continue
         if not is_http_url(url):
-            print("error: %s must start with https:// or http://, got %r."
-                  % (flag, redact(url.rpartition("@")[2])), file=sys.stderr)
+            # The rejected value is not printed: it may be a password typed
+            # in the wrong position, and a log keeps stderr.
+            print("error: %s must start with https:// or http://. The "
+                  "value is not shown, in case it holds a password."
+                  % flag, file=sys.stderr)
             return 64
         if has_userinfo(url):
             print("error: %s must not carry a user name or password in its "
