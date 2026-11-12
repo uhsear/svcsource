@@ -241,7 +241,7 @@ PASS  a credential in the --server url is not echoed in the error line  <-- pinn
 PASS  a --server url with user:password@ is refused with 64 before any call, and the password is not echoed  <-- pinned defect
 ...
 PASS  a --portal url with user:password@ is refused with 64 before any call, and the password is not echoed  <-- pinned defect
-PASS  only an @ in the authority counts as user information, not one in the path, the query or the fragment
+PASS  an @ before the first ? or # counts as user information, so a password holding a / is refused too; one in the query or the fragment does not  <-- pinned defect
 PASS  a bad scheme does not echo the password beside it  <-- pinned defect
 PASS  a catalog that cannot be read exits 2, not the gate's 1  <-- pinned defect
 PASS  and no inventory at all is printed  <-- pinned defect
@@ -356,7 +356,7 @@ PASS  importing the module defines main and runs nothing
 702 assertions, 0 failed
 ```
 
-The block above is an excerpt. Each `...` line stands for omitted `PASS` lines, every line shown is
+The block above is an excerpt of the real run, not the whole output. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
 prints 702 assertions in all. The count is 702 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
@@ -389,7 +389,7 @@ service names, and pasting what it printed. That stand-in site is not one of the
 you cannot reproduce these samples from the repository alone. The self-test is the part you can
 run.
 
-Branch coverage of the self-test is 100%:
+Branch coverage of the self-test is 100%, measured with coverage 7.16.1 on Python 3.13.2:
 
 ```
 python -m coverage run --branch svcsource.py --self-test
@@ -399,9 +399,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2396      0    536      0   100%
+svcsource.py    2402      0    538      0   100%
 ----------------------------------------------------------
-TOTAL           2396      0    536      0   100%
+TOTAL           2402      0    538      0   100%
 ```
 
 ## Usage
@@ -901,7 +901,8 @@ remembers, which is why somebody ran an inventory.
   `unresolved`, which fails the run. That is the safe direction, and it means a cached map service
   whose layers were all copied reads as unresolved. Its `source_document` column still says where
   the source is. A `GeocodeServer` is resolved from its locator path instead, as described above.
-- `copied` for a locator means that its folder is under the server's `arcgisinput` directory, or
+- `copied` for a locator means that its folder is under the server's `arcgisinput` directory
+  followed by an `extracted` folder, or
   that a manifest entry for its folder says `byReference` false. A locator in a folder that is not
   registered, or is registered under another spelling, reads UNKNOWN, not `copied`. On a site where
   many locators read UNKNOWN, compare their paths with the data stores by hand.
@@ -1000,7 +1001,14 @@ remembers, which is why somebody ran an inventory.
   keys whose names contain `pass`, `pwd`, `credential`, `token`, `secret`, `apikey`, `api_key`,
   `access_key` (a hyphen also counts) or `accesskey`, so a password in a
   URL, under a `PW=` field, or under another credential name is written as the server sent
-  it. A `Bearer ...` string is written as sent too.
+  it. A `Bearer ...` string is written as sent too. A key named `key`, `pw`, `authorization` or
+  `sig`, an Azure-style `AccountKey=...` and a SAS `sig=` are written as sent as well. The text
+  before the first `=` of an `AccountKey=KEY==` value stays, because the mask stops at the key
+  name.
+- The same name-only masking applies to error text. A password in a `--server` query under any
+  key other than pass, pwd, token, secret, credential, api key or access key is printed in the
+  generateToken error. A value typed in the server position that is not a url, such as
+  `svcsource.py --user a hunter2`, is echoed back in the usage error as `got 'hunter2'`.
 - The masks also blank harmless words in error text. `generateToken: 400 Unable to generate token`
   prints as `generateToken: *** Unable to generate token`, because the word after
   `generateToken:` reads as a token value. The HTTP code is lost from that line, and
@@ -1098,6 +1106,21 @@ remembers, which is why somebody ran an inventory.
   `token=`, password forms and `user:pass@` are masked there.
 - The masks use regular expressions that can run slowly on a multi-megabyte value made of repeated
   `PASS` or `TOKEN` text with no `=`. No manifest does that.
+- On Windows the password comes from `SVCSOURCE_PASSWORD` or the console prompt, never from
+  piped stdin. `getpass` reads the console there and ignores a pipe, so a run that pipes the
+  password waits. On Linux `getpass` does read piped stdin.
+- The guard only keeps a cell from starting with a trigger character. What a spreadsheet displays
+  for the apostrophe is not tested.
+- The web map and item ID behaviour in the opening story is my own observation. It is not checked
+  against Esri documentation, and no page in the Sources section backs it.
+- The sample outputs are pasted from one local stand-in run and are not reproducible from the
+  repository.
+- The `arcgisinput` rule also needs an `extracted` segment after it, on any drive. A locator under
+  `arcgisinput` with no `extracted` segment reads UNKNOWN. A path such as
+  `D:\arcgisinput\X\extracted\loc.gdb\loc` reads as a copy even when the directory is not the
+  server's own, which errs toward review.
+- The coverage run was done on Windows with Python 3.13.2. The `coverage` module is not installed
+  on the Linux host, so no Linux coverage figure is claimed.
 - `--self-test` writes temporary files under the system temp directory and removes them. It
   writes nothing in the repository.
 
