@@ -155,6 +155,8 @@ PASS  a password in the userinfo of a url is masked with no secret named  <-- pi
 PASS  the word after generateToken: is blanked, as the README Limits say
 PASS  a colon form, a JSON snippet in a string, PASSWD=, PASS=, CREDENTIAL= and a passwd, pass or credential key are masked  <-- pinned defect
 PASS  a token or secret is masked after a space, inside quotes, after a colon and in JSON, not only up to the next space  <-- pinned defect
+PASS  an API key or access key in a url, a connection string or JSON is masked like a token  <-- pinned defect
+PASS  a manifest key named for an API key or access key is masked whole, and one inside a string is masked too  <-- pinned defect
 PASS  the default opener verifies the certificate against the system trust store  <-- pinned defect
 ...
 PASS  the password is posted, never put in the url  <-- pinned defect
@@ -191,8 +193,13 @@ PASS  a portal that will not answer returns None, which is not a blank ID, rathe
 ...
 PASS  a double quote in a service name goes into the portal query as it is, which the README Limits say
 ...
+PASS  two items that record one service url are several, not the first one  <-- pinned defect
+PASS  a portal that lists fewer hits than its total is several, and a single hit with the same url in another case, or with no url, is the item  <-- pinned defect
+PASS  a hit that names another url is not this service  <-- pinned defect
+...
 PASS  a portal search that failed marks the row, fails the run and says so, rather than reading as a service with no item  <-- pinned defect
 ...
+PASS  several portal items blank the item ID, fail the run and say so, rather than a PASS with one arbitrary ID  <-- pinned defect
 PASS  a service that knows its own item ID is not searched for
 PASS  and no search call is made at all  <-- pinned defect
 ...
@@ -346,12 +353,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-689 assertions, 0 failed
+696 assertions, 0 failed
 ```
 
 The block above is an excerpt. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 689 assertions in all. The count is 689 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 696 assertions in all. The count is 696 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -392,9 +399,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2348      0    520      0   100%
+svcsource.py    2396      0    536      0   100%
 ----------------------------------------------------------
-TOTAL           2348      0    520      0   100%
+TOTAL           2396      0    536      0   100%
 ```
 
 ## Usage
@@ -988,8 +995,9 @@ remembers, which is why somebody ran an inventory.
   escaping. A name that holds a double quote changes the query and gives a wrong or missing item
   ID. Such a name is rare.
 - The secret masks work on the text and on key names. `--dump-manifest` masks only fields and
-  keys whose names contain `pass`, `pwd`, `credential`, `token` or `secret`, so a password in a
-  URL, under a `PW=` field, or under an API-key name (`apiKey`) is written as the server sent
+  keys whose names contain `pass`, `pwd`, `credential`, `token`, `secret`, `apikey`, `api_key`,
+  `access_key` (a hyphen also counts) or `accesskey`, so a password in a
+  URL, under a `PW=` field, or under another credential name is written as the server sent
   it. A `Bearer ...` string is written as sent too.
 - The masks also blank harmless words in error text. `generateToken: 400 Unable to generate token`
   prints as `generateToken: *** Unable to generate token`, because the word after
@@ -1035,14 +1043,14 @@ remembers, which is why somebody ran an inventory.
 - A manifest can carry the saved password of the connection the service was published from.
   `--dump-manifest` masks every `PASSWORD=`, `PASSWD=`, `PASS=`, `PWD=`, `CREDENTIAL=`,
   `ENCRYPTED_PASSWORD=` and `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=`,
-  `token:`, `secret=` or `password:` value (a quoted value whole, white space after the separator
+  `token:`, `secret=`, `apikey=`, `access_key=` or `password:` value (a quoted value whole, white space after the separator
   allowed, otherwise up to the next `;`, `&`, quote or space), and every value under a key that
-  contains `pass`, `pwd`, `credential`, `token` or `secret`. A password that itself contains `;KEY=` leaks its tail after that point. A
+  contains `pass`, `pwd`, `credential`, `token`, `secret`, `apikey` or `access_key`. A password that itself contains `;KEY=` leaks its tail after that point. A
   credential under another name is written as the server sent it. Everything else is written as
   sent, hosts and user names included, so share the dump with care.
 - The secret redaction is a plain string replace. A password of one or two characters also blanks
   those characters elsewhere in an error message. Error text also has `user:pass@` in a URL and
-  any `password=`, `token=` or `secret=` value masked, whether or not the tool knew that
+  any `password=`, `token=`, `secret=` or `apikey=` value masked, whether or not the tool knew that
   credential.
 - The token travels in the query string of every GET, as the Admin API accepts, so it can appear
   in web adaptor and proxy access logs. Use https, and treat those logs as sensitive.
@@ -1054,7 +1062,11 @@ remembers, which is why somebody ran an inventory.
   differently. A search the portal answers with no item leaves the ID blank, adds the note
   "portal search found no item", lists the service in the summary and exits 1, because the tool
   cannot tell a service published outside the portal from an item recorded under another spelling
-  of the url. A search that does not answer, or answers something that is not a result list, adds the note
+  of the url. A search that finds several items for one service url, or lists fewer hits than its
+  total, leaves the ID blank, adds the note "portal search found several items", lists the service
+  in the summary and exits 1, because the tool cannot tell which item is the source a republish
+  must keep. The search asks for ten hits and takes only a hit whose own `url` equals the url it
+  searched, ignoring case and a trailing slash. A search that does not answer, or answers something that is not a result list, adds the note
   "portal search failed" to the row, lists the service in the summary and exits 1. It does not
   stop the run.
 - It does not compare two sites. Run it against the old site and the new one and diff the two CSVs
@@ -1067,6 +1079,8 @@ remembers, which is why somebody ran an inventory.
   writes are `--out` and `--dump-manifest`, and only with `--apply`. Under `--apply` a temporary
   `<path>.partial` file is written next to each output and removed after the replace, and missing
   parent folders of the output are created.
+- A cell that is not text is written as it is. A bare negative number is not guarded, which is
+  harmless, because a spreadsheet reads it as a number.
 - A long locator path pushes the data source summary out of its columns. The CSV is not affected.
 - On Windows, the password prompt waits at the console. A scheduled job must set
   `SVCSOURCE_PASSWORD`, or the run waits for a password that nobody types. The prompt reads the

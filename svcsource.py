@@ -135,20 +135,22 @@ REDACTED = "***"
 PASSWORD_FIELD = re.compile(
     r"(\b\w*(?:PASS|PWD|CREDENTIAL)\w*\s*=).*?(?=;\s*\w+\s*=|$)",
     re.I | re.S)
-# token=, secret=, password: and the like in a connection string, a URL query,
+# token=, secret=, apikey=, access_key=, password: and the like in a connection string, a URL query,
 # a log line or a JSON snippet inside a string: the key may end in a quote or
 # take a colon, white space may follow the separator, and the value is a
 # quoted string whole or runs to the next ; & quote or white space. A token is
 # a bearer credential while it lives. After a colon a password with a space in
 # it is masked to the first space only.
 TOKEN_FIELD = re.compile(
-    r"(\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL)\w*[\"']?\s*[=:]\s*)"
+    r"(\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY)"
+    r"\w*[\"']?\s*[=:]\s*)"
     r"(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^;&\s\"']*)", re.I)
 # user:password@ in the authority of a URL.
 URL_USERINFO = re.compile(r"(://)[^/\s]*@")
 # A key whose name says its value is a credential: everything below it is
 # masked.
-SECRET_KEY = re.compile(r"pass|pwd|token|secret|credential", re.I)
+SECRET_KEY = re.compile(
+    r"pass|pwd|token|secret|credential|api[_-]?key|access[_-]?key", re.I)
 
 # Row status. The gate reads this column and nothing else.
 OK = "ok"
@@ -181,6 +183,26 @@ PORTAL_FAILED = ("portal search failed: item ID unknown, not known to be "
 PORTAL_NO_ITEM = ("portal search found no item: item ID unknown, not known "
                   "to be absent")
 
+# The note of a service whose --portal search found more than one item, or
+# more than the portal listed. Several items can record one service url, for
+# example after "add item from URL", and the tool cannot say which is the
+# source a republish must keep.
+PORTAL_MANY = ("portal search found several items: item ID unknown, the tool "
+               "cannot tell which is the source")
+
+
+class _SeveralItems(object):
+    """What the portal search returns for PORTAL_MANY. Falsy, so it never
+    reads as an item ID."""
+
+    def __bool__(self):
+        return False
+
+    __nonzero__ = __bool__
+
+
+SEVERAL_ITEMS = _SeveralItems()
+
 # The participants column of a geocode service whose REST resource did not
 # answer, so whether it is a composite is not known.
 PARTICIPANTS_UNKNOWN = "UNKNOWN"
@@ -207,6 +229,9 @@ COLUMNS = ("folder", "service", "type", "path", "status", "source_item_id",
            "database", "db_user", "version", "capabilities", "extensions",
            "source_document", "note", "participants", "recycle_start",
            "recycle_interval", "aprx")
+
+# How many hits the item-ID search asks for. More than one is a finding.
+PORTAL_PAGE = 10
 
 # Admin API service type -> portal item type, for the --portal search fallback.
 # Extend as new service types appear; an unknown type skips the fallback rather
@@ -799,6 +824,8 @@ def rows_for_service(record, service_json, manifest, portal_item_id="",
         notes.append(PORTAL_FAILED)
     if not chosen and portal_item_id is False:
         notes.append(PORTAL_NO_ITEM)
+    if not chosen and portal_item_id is SEVERAL_ITEMS:
+        notes.append(PORTAL_MANY)
     if not chosen and portal_item_id:
         # The fallback answers for a service whose portalProperties are empty,
         # which is what an unfederated site or a hand-published service looks
@@ -1256,6 +1283,8 @@ def summarize(rows, unsettled=0):
                           if PORTAL_FAILED in r.get("note", "")],
         "portal_no_item": [r for r in services
                            if PORTAL_NO_ITEM in r.get("note", "")],
+        "portal_many": [r for r in services
+                        if PORTAL_MANY in r.get("note", "")],
         "locator_unsettled": unsettled,
         "aprx_paired": len(paired),
         "aprx_ambiguous": [r for r in services if r.get("aprx") == AMBIGUOUS],
@@ -1329,6 +1358,16 @@ def describe(summary, sample=10):
         if len(summary["portal_no_item"]) > sample:
             out.append("  ...and %d more" % (len(summary["portal_no_item"])
                                               - sample))
+    if summary["portal_many"]:
+        out.append("")
+        out.append("portal search found several items: %d. Their item IDs "
+                   "are blank because the tool cannot tell which item is "
+                   "the source." % len(summary["portal_many"]))
+        for row in summary["portal_many"][:sample]:
+            out.append("  %s" % row.get("path", ""))
+        if len(summary["portal_many"]) > sample:
+            out.append("  ...and %d more" % (len(summary["portal_many"])
+                                              - sample))
     if summary["json_unread"]:
         out.append("")
         out.append("service JSON unread: %d. Their item IDs are blank because "
@@ -1380,6 +1419,7 @@ def exit_code(summary):
     """
     if (summary["unresolved"] or summary["json_unread"]
             or summary["portal_failed"] or summary["portal_no_item"]
+            or summary["portal_many"]
             or summary["locator_unsettled"]
             or aprx_none_paired(summary)):
         return 1
@@ -1407,6 +1447,11 @@ def verdict_line(summary):
                 "their item IDs are blank. The tool cannot say whether an "
                 "item exists under another spelling of the url."
                 % len(summary["portal_no_item"]))
+    if code == 1 and summary["portal_many"]:
+        return ("FAIL: the portal search found several items for %d "
+                "service(s), so their item IDs are blank. The tool cannot "
+                "tell which item is the source."
+                % len(summary["portal_many"]))
     if code == 1 and summary["locator_unsettled"]:
         return ("FAIL: %d --locator target(s) could not be settled. The tool "
                 "cannot say that no service reads them."
@@ -1632,7 +1677,7 @@ def portal_searcher(portal, token, public_rest_root, insecure=False,
         query = 'type:"%s" AND url:"%s"' % (portal_type, url)
         try:
             body = _call("%s/search" % portal.rstrip("/"),
-                         {"q": query, "num": 1, "token": token},
+                         {"q": query, "num": PORTAL_PAGE, "token": token},
                          insecure=insecure, secret=token, timeout=timeout)
         except RuntimeError:
             return None
@@ -1641,8 +1686,21 @@ def portal_searcher(portal, token, public_rest_root, insecure=False,
             return None
         if not results:
             return False
-        ident = (results[0].get("id") if isinstance(results[0], dict)
-                 else None)
+        if not all(isinstance(r, dict) for r in results):
+            return None
+        # A hit that names another url is not this service. A hit with no
+        # url is kept.
+        want = url.lower().rstrip("/")
+        hits = [r for r in results
+                if not isinstance(r.get("url"), str)
+                or r["url"].lower().rstrip("/") == want]
+        total = body.get("total")
+        if len(hits) > 1 or (hits and isinstance(total, int)
+                             and total > len(results)):
+            return SEVERAL_ITEMS
+        if not hits:
+            return False
+        ident = hits[0].get("id")
         return ident if isinstance(ident, str) else None
     return search
 
@@ -3102,6 +3160,23 @@ def self_test():
           "a token or secret is masked after a space, inside quotes, after a "
           "colon and in JSON, not only up to the next space  <-- pinned "
           "defect")
+    check(redact("https://h/x?apikey=KEY123&f=json")
+          == "https://h/x?apikey=***&f=json"
+          and redact("api_key=KEY123") == "api_key=***"
+          and redact("ACCESS_KEY=KEY123;x=1") == "ACCESS_KEY=***;x=1"
+          and redact("x-api-key: KEY123") == "x-api-key: ***"
+          and redact("accessKey=KEY123") == "accessKey=***"
+          and "KEY123" not in redact('{"apiKey": "KEY123"}'),
+          "an API key or access key in a url, a connection string or JSON "
+          "is masked like a token  <-- pinned defect")
+    check(mask_passwords({"apiKey": "KEY9", "a": {"api_key": ["K", 5]},
+                          "access-key": 7, "ok": "x"})
+          == {"apiKey": "***", "a": {"api_key": ["***", "***"]},
+              "access-key": "***", "ok": "x"}
+          and "KEY9" not in manifest_text({"s": {"u": "https://h/x?"
+                                                 "apikey=KEY9&f=json"}}),
+          "a manifest key named for an API key or access key is masked "
+          "whole, and one inside a string is masked too  <-- pinned defect")
 
     # ---- the site, answered in process. No socket is opened and no credential
     # is real. _opener is swapped for a stand-in that answers the paths an
@@ -3764,6 +3839,47 @@ def self_test():
     check(serving(OddPortal([]), lambda: search(record)) is False,
           "an empty result list is an answer: the portal holds no item at "
           "that url")
+    class ManyPortal(Site):
+        """A portal that answers a chosen body for any search."""
+
+        def __init__(self, body):
+            Site.__init__(self)
+            self.body = body
+            self.asked = []
+
+        def _body(self, path, params):
+            self.asked.append(params)
+            return self.body
+    surl = REST_ROOT + "/Parcels/FeatureServer"
+    two = ManyPortal({"total": 2, "results": [{"id": "a" * 32, "url": surl},
+                                              {"id": "b" * 32, "url": surl}]})
+    check(serving(two, lambda: search(record)) is SEVERAL_ITEMS
+          and two.asked[0]["num"] == str(PORTAL_PAGE),
+          "two items that record one service url are several, not the "
+          "first one  <-- pinned defect")
+    check(serving(ManyPortal({"total": 25, "results": [
+              {"id": "a" * 32, "url": surl}]}),
+              lambda: search(record)) is SEVERAL_ITEMS
+          and serving(ManyPortal({"total": 1, "results": [
+              {"id": "a" * 32, "url": surl.upper() + "/"}]}),
+              lambda: search(record)) == "a" * 32
+          and serving(ManyPortal({"results": [{"id": "a" * 32}]}),
+                      lambda: search(record)) == "a" * 32,
+          "a portal that lists fewer hits than its total is several, and a "
+          "single hit with the same url in another case, or with no url, is "
+          "the item  <-- pinned defect")
+    check(serving(ManyPortal({"total": 3, "results": [
+              {"id": "a" * 32, "url": surl},
+              {"id": "b" * 32, "url": surl + "/0"}]}),
+              lambda: search(record)) is SEVERAL_ITEMS
+          and serving(ManyPortal({"total": 1, "results": [
+              {"id": "c" * 32, "url": REST_ROOT + "/Other/FeatureServer"}]}),
+              lambda: search(record)) is False,
+          "a hit that names another url is not this service  <-- pinned "
+          "defect")
+    check(not SEVERAL_ITEMS and SEVERAL_ITEMS is not False
+          and SEVERAL_ITEMS is not None and SEVERAL_ITEMS.__nonzero__() is False,
+          "the several-items result is falsy and is neither False nor None")
     check(portal_searcher("", "t", REST_ROOT) is None,
           "no --portal means no fallback at all")
     check(portal_searcher(PORTAL, "t", "") is None,
@@ -3838,6 +3954,24 @@ def self_test():
           and exit_code(summarize(hand)) == 0,
           "a service type with no portal item type is not searched, so it "
           "is not a miss")
+    rows = serving(site(services=bare, manifests=bare_manifest),
+                   lambda: inventory(
+        json_getter("TESTTOKEN"), ROOT, [noitem],
+        search=lambda r: SEVERAL_ITEMS))
+    sm = summarize(rows)
+    many_pm = summarize(rows)
+    many_pm["portal_many"] = [rows[0]] * 12
+    check(rows[0]["source_item_id"] == "" and PORTAL_MANY in rows[0]["note"]
+          and PORTAL_FAILED not in rows[0]["note"]
+          and PORTAL_NO_ITEM not in rows[0]["note"]
+          and len(sm["portal_many"]) == 1 and exit_code(sm) == 1
+          and verdict_line(sm).startswith("FAIL: the portal search found "
+                                          "several items for 1 service(s)")
+          and any(l.startswith("portal search found several items: 1.")
+                  for l in describe(sm))
+          and describe(many_pm)[-1] == "  ...and 2 more",
+          "several portal items blank the item ID, fail the run and say so, "
+          "rather than a PASS with one arbitrary ID  <-- pinned defect")
     with_props = site(items={query: "eee55555555555555555555555555555"})
     rows = serving(with_props, lambda: inventory(
         json_getter("TESTTOKEN"), ROOT, [record],
