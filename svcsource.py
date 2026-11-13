@@ -74,6 +74,7 @@ import io
 import json
 import os
 import posixpath
+import random
 import re
 import ssl
 import sys
@@ -137,24 +138,23 @@ REDACTED = "***"
 PASSWORD_FIELD = re.compile(
     r"(\b\w*(?:PASS|PWD|CREDENTIAL)\w*\s*=).*?(?=;\s*\w+\s*=|$)",
     re.I | re.S)
-# token=, secret=, apikey=, access_key=, password: and the like in a connection string, a URL query,
-# a log line or a JSON snippet inside a string: the key may end in a quote or
-# take a colon, white space may follow the separator, and the value is a
-# quoted string whole (a backslash escapes a quote; a backslash-quote pair, as
-# in JSON kept inside a string, opens and closes one too) or runs to the next
-# ; & , } or space. After = an unquoted value also runs through spaces, quote
-# marks and non-ASCII spaces to the next ; & , } or line end, unless it is
-# already ***. A token is a bearer credential
-# while it lives. After a colon a password with a space in it is masked to the
-# first space only.
+# A key that names a credential, in a connection string, a URL query, a log
+# line or JSON kept inside a string: password, token, secret, api key,
+# Authorization, and the words Bearer and Basic. The key may carry a quote
+# with any number of backslashes before it, and takes = or : with any white
+# space (non-breaking included) around it. TOKEN_FIELD matches the key and
+# the separator only; _value_end finds where the value stops. A token is a
+# bearer credential while it lives, so the rule is to mask too much.
 TOKEN_FIELD = re.compile(
-    r"(\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY)"
-    r"\w*(?:\\?[\"'])?\s*(?:(=)|:)\s*)"
-    r"(?:\\\"(?:(?!\\\").)*(?:\\\"|$)"
-    r"|\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|\*\*\*"
-    r"|[^;&,}\r\n \t]*(?(2)(?:[ \t]+[^;&,}\r\n]+)*))", re.I)
-# user:password@ in the authority of a URL.
-URL_USERINFO = re.compile(r"(://)[^\s?#]*@")
+    r"\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY)"
+    r"\w*(?:\\*[\"'])?\s*[=:]\s*"
+    r"|\b(?P<line>(?:proxy-)?authorization\w*(?:\\*[\"'])?\s*[=:]\s*"
+    r"|(?:bearer|basic)(?:\\*[\"'])?(?:\s*[=:]\s*|\s+))", re.I)
+_QUOTED_VALUE = re.compile(r"(\\*)([\"'])")
+# user:password@ in the authority of a URL: everything after :// up to the
+# last @ before the first ? or #, spaces and slashes included, since a
+# password may hold either.
+URL_USERINFO = re.compile(r"(://)[^\r\n?#]*@")
 # A key whose name says its value is a credential: everything below it is
 # masked.
 SECRET_KEY = re.compile(
@@ -1538,6 +1538,64 @@ def verdict_line(summary):
     return "PASS: every data source was read."
 
 
+def _value_end(text, start, to_eol):
+    """The index where the secret value that starts at start stops.
+
+    A quoted value stops after the matching quote: one with the same number
+    of backslashes in front of it as the opening quote had, or, for a plain
+    quote, an even number (a backslash may escape a backslash). A value that
+    never closes, and an Authorization, Bearer or Basic credential that is
+    not quoted, run to the end of the line. Any other value runs to the next
+    , ; & or } or the end of the line. A value that is already *** stops
+    there, so a second pass changes nothing.
+    """
+    eol = start
+    while eol < len(text) and text[eol] not in "\r\n":
+        eol += 1
+    if text.startswith(REDACTED, start) and not (
+            text[start + 3:start + 4].isalnum()):
+        return start + 3
+    opened = _QUOTED_VALUE.match(text, start)
+    if not opened:
+        if to_eol:
+            return eol
+        end = start
+        while end < eol and text[end] not in ",;&}":
+            end += 1
+        return end
+    depth, quote = len(opened.group(1)), opened.group(2)
+    i = opened.end()
+    while i < eol:
+        run = i
+        while run < eol and text[run] == "\\":
+            run += 1
+        if run < eol and text[run] == quote:
+            slashes = run - i
+            if slashes == depth if depth else slashes % 2 == 0:
+                return run + 1
+            i = run + 1
+        else:
+            i = max(run, i + 1)
+    return eol
+
+
+def mask_fields(text):
+    """text with the value of every credential-named key replaced by ***."""
+    out, pos = [], 0
+    while True:
+        found = TOKEN_FIELD.search(text, pos)
+        if not found:
+            return "".join(out) + text[pos:]
+        out.append(text[pos:found.end()] + REDACTED)
+        pos = _value_end(text, found.end(), bool(found.group("line")))
+
+
+def scrub(text):
+    """Mask userinfo, connection string passwords and credential fields."""
+    return mask_fields(PASSWORD_FIELD.sub(
+        r"\1" + REDACTED, URL_USERINFO.sub(r"\1" + REDACTED + "@", text)))
+
+
 def redact(text, *secrets):
     """Remove secrets from anything about to be printed or written.
 
@@ -1560,8 +1618,7 @@ def redact(text, *secrets):
                 urllib.parse.quote_plus(text), REDACTED)
     # What no caller knew to name: a password in the userinfo of --server, or
     # a token in the query string it carries, comes back in urllib's errors.
-    return TOKEN_FIELD.sub(r"\1" + REDACTED, PASSWORD_FIELD.sub(
-        r"\1" + REDACTED, URL_USERINFO.sub(r"\1" + REDACTED + "@", out)))
+    return scrub(out)
 
 
 # ------------------------------------------------------------------ server io
@@ -1615,6 +1672,13 @@ def _call(endpoint, params, insecure=False, post=False, secret=None,
     data = urllib.parse.urlencode(params).encode("utf-8")
     token = params.get("token")
     password = params.get("password")
+
+    def fail(detail):
+        # The endpoint and the detail are redacted apart. Joined, the
+        # endpoint's last word (generateToken) reads as a credential key and
+        # masks the site's whole reason.
+        return "%s: %s" % (redact(endpoint, secret, token, password),
+                           redact(detail, secret, token, password))
     try:
         opener = _opener(insecure)
         if post:
@@ -1624,8 +1688,7 @@ def _call(endpoint, params, insecure=False, post=False, secret=None,
                                    timeout=timeout)
         body = json.loads(response.read().decode("utf-8", "replace"))
     except Exception as exc:
-        raise RuntimeError(redact("%s: %s" % (endpoint, exc), secret, token,
-                                  password))
+        raise RuntimeError(fail(exc))
     if not isinstance(body, dict):
         # A proxy error page, a captive portal and a load balancer notice can
         # all parse as valid JSON without being an ArcGIS response, and every
@@ -1635,18 +1698,14 @@ def _call(endpoint, params, insecure=False, post=False, secret=None,
                            % (endpoint, type(body).__name__))
     if "error" in body:
         error = body["error"] if isinstance(body["error"], dict) else {}
-        raise RuntimeError(redact(
-            "%s: %s %s" % (endpoint, error.get("code"),
-                           error.get("message") or body["error"]),
-            secret, token, password))
+        raise RuntimeError(fail("%s %s" % (
+            error.get("code"), error.get("message") or body["error"])))
     if body.get("status") in ("error", "failed"):
         # The Admin API's own failure shape, documented under Operation
         # Response: {"status": "error", "messages": [...], "code": 498}. Read
         # as a success, an expired token made a manifest look empty.
-        raise RuntimeError(redact(
-            "%s: %s %s" % (endpoint, body.get("code"),
-                           body.get("messages") or body["status"]),
-            secret, token, password))
+        raise RuntimeError(fail("%s %s" % (
+            body.get("code"), body.get("messages") or body["status"])))
     return body
 
 
@@ -1951,8 +2010,7 @@ def mask_passwords(value, secret=False):
     if secret:
         return REDACTED
     if isinstance(value, str):
-        return TOKEN_FIELD.sub(r"\1" + REDACTED, PASSWORD_FIELD.sub(
-            r"\1" + REDACTED, URL_USERINFO.sub(r"\1" + REDACTED + "@", value)))
+        return scrub(value)
     return value
 
 
@@ -3190,12 +3248,11 @@ def self_test():
           "named  <-- pinned defect")
     check(redact("https://h/arcgis/admin/generateToken: 400 Unable to "
                  "generate token")
-          == "https://h/arcgis/admin/generateToken: *** Unable to generate "
-             "token"
+          == "https://h/arcgis/admin/generateToken: ***"
           and redact("generateToken: <urlopen error timed out>")
-          == "generateToken: *** error timed out>",
-          "the word after generateToken: is blanked, as the README Limits "
-          "say")
+          == "generateToken: ***",
+          "the rest of the line after generateToken: is blanked, as the "
+          "README Limits say")
     check(mask_passwords({"a": "Password: hunter2", "b": '{"password": "x"}',
                           "c": "PASSWD=hunter2;USER=u",
                           "d": "SERVER=h;PASS=hunter2",
@@ -3239,6 +3296,87 @@ def self_test():
           and redact("token=ab\xa0cd;x=1") == "token=***;x=1",
           "a backslash-escaped JSON secret, a quote mark inside an unquoted "
           "value and a non-breaking space are masked whole  <-- pinned defect")
+    check(redact(r"{\'token\':\'abc def\'}") == r"{\'token\':***}"
+          and redact(r'{\"token\":\"abc\\\"def ghi\"}') == r'{\"token\":***}'
+          and redact(r'{\\\"token\\\":\\\"abc def\\\"}')
+          == r'{\\\"token\\\":***}'
+          and redact(r'{\"token\":\"abc def\",\"n\":1}')
+          == r'{\"token\":***,\"n\":1}',
+          "a secret in JSON kept inside a string is masked whole with a "
+          "backslash-quote, an escaped quote or three backslashes round it "
+          " <-- pinned defect")
+    check(redact("token : abc def") == "token : ***"
+          and redact("token:\xa0abc def") == "token:\xa0***"
+          and redact("token = abc def;x=1") == "token = ***;x=1"
+          and redact("token: abc def\nnext line") == "token: ***\nnext line"
+          and redact("token=a b\u3000c&f=json") == "token=***&f=json",
+          "= and : take any white space on either side and mask the same "
+          "way, a value with spaces whole  <-- pinned defect")
+    check(redact("https://u:p w@host/x") == "https://***@host/x"
+          and redact("see https://u:p w@h?x=a@b") == "see https://***@h?x=a@b"
+          and redact("https://h/x?e=a@b") == "https://h/x?e=a@b",
+          "a url password with a space is masked up to the last @ before a "
+          "? or #, and an @ in a query is left alone  <-- pinned defect")
+    check(redact("Authorization: Bearer abc def") == "Authorization: ***"
+          and redact("bearer=abc def") == "bearer=***"
+          and redact("Authorization: Basic abc,def;ghi\nnext")
+          == "Authorization: ***\nnext"
+          and redact('{"Authorization": "Bearer abc def", "n": 1}')
+          == '{"Authorization": ***, "n": 1}'
+          and redact("got Bearer abc def") == "got Bearer ***",
+          "an Authorization, Bearer or Basic credential is masked to the "
+          "end of the line  <-- pinned defect")
+    rng = random.Random(20261113)
+    fuzz_keys = ("token", "accessToken", "access_token", "password", "pwd",
+                 "client_secret", "apikey", "api_key", "credential", "PassWd")
+    fuzz_line_keys = ("Authorization", "authorization", "bearer",
+                      "Proxy-Authorization")
+    fuzz_seps = ("=", ":", " = ", " : ", ":\xa0", "=\u2003", ":\t", "\u3000=")
+    fuzz_pieces = ("ab", " ", "\xa0", "\u2003", "\u3000", "\u00e9", "x\\y",
+                   "'", '"', "\\", "\\\\", "  ", "q w")
+    fuzz_failures = []
+    for case in range(2000):
+        depth, quote = rng.randint(0, 3), rng.choice("\"'")
+        mark = "ZQ%dXV" % case
+        line = rng.random() < 0.25
+        key = rng.choice(fuzz_line_keys if line else fuzz_keys)
+        fence = "\\" * depth + quote
+        key_text = fence + key + fence if rng.random() < 0.6 else key
+        sep = rng.choice(fuzz_seps)
+        if key == "bearer" and rng.random() < 0.3:
+            sep = " "
+            key_text = key
+        quoted = rng.random() < 0.5 and sep != " "
+        parts = [rng.choice(fuzz_pieces) for _ in range(rng.randint(0, 6))]
+        if quoted:
+            # A quote in a quoted value is escaped as the depth escapes it. A
+            # lone backslash is never put right before one.
+            parts = [("\\" * (2 * depth + 1) + quote) if x in "'\"" and x
+                     else x for x in parts]
+            parts = [x if not x.endswith("\\") else x + "y" for x in parts]
+        else:
+            banned = ("" if line else ",;&}")
+            parts = [x for x in parts if not any(c in banned for c in x)]
+        body = "ab" + "".join(parts) + mark
+        value = fence + body + fence if quoted else body
+        text = "go %s%s%s end" % (key_text, sep, value)
+        out = redact(text)
+        if mark in out or redact(out) != out:
+            fuzz_failures.append((text, out))
+    for case in range(200):
+        mark = "UQ%dXV" % case
+        word = "".join(rng.choice("p w/:!#x") for _ in range(rng.randint(0, 6)))
+        text = "bad https://u:%s%s@host/a?x=1 end" % (word, mark)
+        if "?" in word or "#" in word or "@" in word:
+            continue
+        if mark in redact(text):
+            fuzz_failures.append((text, redact(text)))
+    check(not fuzz_failures,
+          "a seeded random sweep of 2200 keys, quotes, backslash depths, "
+          "separators and secret bodies never lets a secret through redact "
+          "and a second pass changes nothing  <-- pinned defect"
+          + (" first failure: %r" % (fuzz_failures[:1],)
+             if fuzz_failures else ""))
     check(redact("https://h/x?apikey=KEY123&f=json")
           == "https://h/x?apikey=***&f=json"
           and redact("api_key=KEY123") == "api_key=***"

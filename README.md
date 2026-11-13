@@ -152,9 +152,15 @@ PASS  one unreadable data source fails the run  <-- pinned defect
 ...
 PASS  a token in the escaped form urlencode gave it is redacted too  <-- pinned defect
 PASS  a password in the userinfo of a url is masked with no secret named  <-- pinned defect
-PASS  the word after generateToken: is blanked, as the README Limits say
+PASS  the rest of the line after generateToken: is blanked, as the README Limits say
 PASS  a colon form, a JSON snippet in a string, PASSWD=, PASS=, CREDENTIAL= and a passwd, pass or credential key are masked  <-- pinned defect
 PASS  a token or secret is masked after a space, inside quotes, after a colon and in JSON, not only up to the next space  <-- pinned defect
+PASS  a backslash-escaped JSON secret, a quote mark inside an unquoted value and a non-breaking space are masked whole  <-- pinned defect
+PASS  a secret in JSON kept inside a string is masked whole with a backslash-quote, an escaped quote or three backslashes round it  <-- pinned defect
+PASS  = and : take any white space on either side and mask the same way, a value with spaces whole  <-- pinned defect
+PASS  a url password with a space is masked up to the last @ before a ? or #, and an @ in a query is left alone  <-- pinned defect
+PASS  an Authorization, Bearer or Basic credential is masked to the end of the line  <-- pinned defect
+PASS  a seeded random sweep of 2200 keys, quotes, backslash depths, separators and secret bodies never lets a secret through redact and a second pass changes nothing  <-- pinned defect
 PASS  an API key or access key in a url, a connection string or JSON is masked like a token  <-- pinned defect
 PASS  a manifest key named for an API key or access key is masked whole, and one inside a string is masked too  <-- pinned defect
 PASS  a password in the userinfo of a url inside a manifest is masked in the dump file, and a url with none is kept  <-- pinned defect
@@ -358,12 +364,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-717 assertions, 0 failed
+723 assertions, 0 failed
 ```
 
 The block above is an excerpt of the real run, not the whole output. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 717 assertions in all. The count is 717 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 723 assertions in all. The count is 723 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -1010,7 +1016,8 @@ remembers, which is why somebody ran an inventory.
   keys whose names contain `pass`, `pwd`, `credential`, `token`, `secret`, `apikey`, `api_key`,
   `access_key` (a hyphen also counts) or `accesskey`, and it masks the `user:password@` part of a
   url inside a string. So a password in a url query under another name, under a `PW=` field, or
-  under another credential name is written as the server sent it. A `Bearer ...` string is written as sent too. A key named `key`, `pw`, `authorization` or
+  under another credential name is written as the server sent it. An `Authorization:`, `Bearer` or `Basic` credential inside a string is masked to the end of the
+  line, but a manifest key named `authorization` is not masked whole. A key named `key`, `pw` or
   `sig`, a `private_key=...`, an Azure-style `AccountKey=...` and a SAS `sig=` are written as sent as well. The text
   before the first `=` of an `AccountKey=KEY==` value stays, because the mask stops at the key
   name.
@@ -1018,10 +1025,11 @@ remembers, which is why somebody ran an inventory.
   key other than pass, pwd, token, secret, credential, api key or access key is printed in the
   generateToken error. A `--server` or `--portal` value that is not an http(s) url is not
   printed at all, so a password typed in that position stays out of the log.
-- The masks also blank harmless words in error text. `generateToken: 400 Unable to generate token`
-  prints as `generateToken: *** Unable to generate token`, because the word after
-  `generateToken:` reads as a token value. The HTTP code is lost from that line, and
-  `generateToken: <urlopen error ...>` prints with `***` for `<urlopen`.
+- The masks also blank harmless words in text. An unquoted value after a credential key is masked to
+  the end of the line or the next `,`, `;`, `&` or `}`, so `token: expired or unknown` prints as
+  `token: ***`. The tool redacts the endpoint and the site's reason of a failed call apart, so
+  `.../admin/generateToken: 400 Unable to generate token` keeps its reason. Text that you
+  redact yourself with `generateToken:` in front of it prints as `generateToken: ***`.
 - A service, folder or database name from the site is printed to the console as sent, so a name
   with terminal escape sequences can change what your terminal shows. The CSV and the dump are not
   affected. Console output is not stripped of control characters.
@@ -1062,8 +1070,9 @@ remembers, which is why somebody ran an inventory.
 - A manifest can carry the saved password of the connection the service was published from.
   `--dump-manifest` masks every `PASSWORD=`, `PASSWD=`, `PASS=`, `PWD=`, `CREDENTIAL=`,
   `ENCRYPTED_PASSWORD=` and `ENCRYPTED_PASSWORD_UTF8=` field in every string, every `token=`,
-  `token:`, `secret=`, `apikey=`, `access_key=` or `password:` value (a quoted value whole, white space after the separator
-  allowed, otherwise up to the next `;`, `&`, quote or space), and every value under a key that
+  `token:`, `secret=`, `apikey=`, `access_key=` or `password:` value (a quoted value whole, with any
+  backslashes before the quote and any white space around the separator, otherwise up to the next
+  `,`, `;`, `&`, `}` or the end of the line), and every value under a key that
   contains `pass`, `pwd`, `credential`, `token`, `secret`, `apikey` or `access_key`. A password that itself contains `;KEY=` leaks its tail after that point. A
   credential under another name is written as the server sent it. Everything else is written as
   sent, hosts and user names included, so share the dump with care.
@@ -1130,13 +1139,14 @@ remembers, which is why somebody ran an inventory.
   server's own, which errs toward review.
 - The coverage run was done on Windows with Python 3.13.2. The `coverage` module is not installed
   on the Linux host, so no Linux coverage figure is claimed.
-- Masking in error text is partial in four rare cases. An unquoted value with a space after a
-  `token`, `api_key`, `password` or `credential` key keeps the text after the space. A quoted
-  secret that holds an escaped quote keeps the text after that quote. A password that holds `;word=`
-  keeps its tail. An unquoted token that holds a quote keeps the text after the quote. The tool
+- Masking in error text is partial in three rare cases. An unquoted secret that holds a `,`, `;`,
+  `&` or `}` keeps the text after that character. A quoted secret that holds a raw quote, one with
+  no backslashes where the opening quote had some, ends there and keeps the rest. A password that
+  holds `;word=` keeps its tail. A value that starts with `***` and a non-word character is read
+  as already masked. The tool
   masks its own password and token exactly, so these only matter for a secret it did not hold.
 - The secret masks use backtracking patterns. A hostile server message packed with `://` makes
-  error masking slow, about 12 seconds for 80 KB. A normal message is instant.
+  error masking slow, about 3.5 seconds for 80 KB (one run, Windows, Python 3.13). A normal message is instant.
 - `--dump-manifest` keys each manifest by the service path. A service whose path holds `pass`,
   `pwd`, `token`, `secret`, `credential`, `api key` or `access key`, such as `Compass`, has its whole
   manifest written as `***`. That errs toward hiding.
@@ -1163,8 +1173,8 @@ remembers, which is why somebody ran an inventory.
   were re-read on 2026-10-13. The statements about Manager, Pro, the ArcGIS API for Python and the
   analyzers, and the two GitHub projects, are not exercised by the self-test. The GitHub search is
   dated 2026-10-13 and may be stale.
-- A connection-refused error prints as `generateToken: *** error [WinError 10061] ...>`, because
-  the mask blanks `<urlopen`. No credential shows, and the exit code is 2 with no file written.
+- A connection-refused error prints as `.../generateToken: <urlopen error [WinError 10061] ...>`.
+  No credential shows, and the exit code is 2 with no file written.
 - The instance-string forms for SQL Server and Oracle (`HOST\INSTANCE`, `HOST,port` and Oracle Easy
   Connect) are read from observed connection strings, and no vendor page is cited for them.
 - A `--recycle-with` file with a header and no rows, or whose rows have no server, prints the
