@@ -463,7 +463,7 @@ each new flag is refused.
 There is no `--password` flag and there never will be. `argv` is readable by every process on the
 machine, and it lands in shell history and in scheduler logs. The password comes from
 `SVCSOURCE_PASSWORD`, or from `SVCSOURCE_PORTAL_PASSWORD` for the portal, or from an unechoed
-prompt. No credential reaches the CSV, and every error message is stripped of the password and the
+prompt. The CSV keeps only five keys of a connection string (see Limits for the text fields that are written as the site sent them), and every error message is stripped of the password and the
 token before it is printed, because `generateToken` is a POST that urllib repeats in some of its
 exceptions and a token travels as a query parameter in a url urllib quotes back. A password typed
 on the command line by mistake, as `--password=hunter2`, is not echoed in the usage error: the
@@ -489,14 +489,14 @@ participants,recycle_start,recycle_interval,aprx
 
 | Column | What it answers |
 |---|---|
-| `status` | `ok`, `copied`, `no-datasource` or `unresolved`. The gate reads this and nothing else. |
+| `status` | `ok`, `copied`, `no-datasource` or `unresolved`. Only the `unresolved` count of the exit code comes from this column. The exit code also reads the `note` column (service JSON unread, portal search failed, no item, several items) and the `aprx` column (`NOT FOUND`, `AMBIGUOUS`), so a run can exit 1 while every row says `ok`. Gate on the exit code, not on this column. |
 | `source_item_id` | The portal item ID to preserve when this service is republished. |
 | `all_item_ids` | Every item ID on the service, as `Type=id`. A map service shared as a feature service has two. |
 | `by_reference` | `false` means the data was copied to the server at publish time. |
 | `dataset` | The dataset name as the server sees it. |
 | `server`, `instance`, `database`, `db_user`, `version` | The connection the service reads through. For a geocode service, `database` is the locator folder and `dataset` is the locator. |
 | `extensions` | The enabled extensions, which a plain republish does not recreate. |
-| `source_document` | The `.mxd` or `.aprx` on the publisher's machine, from the manifest. |
+| `source_document` | The `.mxd` or `.aprx` path the manifest records in `onPremisePath`. When a manifest resource has no path, the cell holds its `clientName`, which Esri documents as the publishing machine and not a file. The `aprx` pairing uses `onPremisePath` only. |
 | `participants` | For a geocode service only. The reference names of a composite's locators, joined with `\|`. Blank for a single locator. `UNKNOWN` when the REST resource would not answer. |
 | `recycle_start`, `recycle_interval` | The service's `recycleStartTime` as `HH:MM`, and its `recycleInterval` in whole hours. Blank when the service JSON does not give a value in that form. |
 | `aprx` | With `--aprx-dir`: the paired project, `AMBIGUOUS`, or `NOT FOUND`. Blank without the flag, and for a service that reads no project. |
@@ -1002,7 +1002,7 @@ remembers, which is why somebody ran an inventory.
   `access_key` (a hyphen also counts) or `accesskey`, so a password in a
   URL, under a `PW=` field, or under another credential name is written as the server sent
   it. A `Bearer ...` string is written as sent too. A key named `key`, `pw`, `authorization` or
-  `sig`, an Azure-style `AccountKey=...` and a SAS `sig=` are written as sent as well. The text
+  `sig`, a `private_key=...`, an Azure-style `AccountKey=...` and a SAS `sig=` are written as sent as well. The text
   before the first `=` of an `AccountKey=KEY==` value stays, because the mask stops at the key
   name.
 - The same name-only masking applies to error text. A password in a `--server` query under any
@@ -1156,6 +1156,23 @@ remembers, which is why somebody ran an inventory.
   dated 2026-10-13 and may be stale.
 - A connection-refused error prints as `generateToken: *** error [WinError 10061] ...>`, because
   the mask blanks `<urlopen`. No credential shows, and the exit code is 2 with no file written.
+- The instance-string forms for SQL Server and Oracle (`HOST\INSTANCE`, `HOST,port` and Oracle Easy
+  Connect) are read from observed connection strings, and no vendor page is cited for them.
+- A `--recycle-with` CSV that has the right header and no `recycle_start` values still prints the
+  "recycle skew: no geodatabase has services from two sites" line. Nothing was compared, and the
+  line reads as a clean comparison. The recycle result is not part of the exit code.
+- Under `--apply`, an exit 1 run (unread sources) still replaces the last good `--out` file with
+  the incomplete inventory. Only exit 2 leaves the old file untouched. Keep a copy of the earlier
+  file.
+- A per-service JSON answer of `{}` is a valid object with no `serviceName`. It is read as a
+  service with no portal item and no note, so a degenerate proxy answer gives a quiet row, not
+  "service JSON could not be read".
+- A portal item search hit that has no `url` field is kept. With a service name that changes the
+  query, such a hit could be reported as the source item ID. ArcGIS Server service names cannot
+  hold a quote, so this is rare.
+- The masks do not hide a bare `--password` followed by a value that starts with a dash, as in
+  `run.exe --password -Abc123`. The tool never echoes its own arguments, so its output does not
+  reach this case.
 - `--self-test` writes temporary files under the system temp directory and removes them. It
   writes nothing in the repository.
 

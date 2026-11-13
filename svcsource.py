@@ -152,7 +152,9 @@ URL_USERINFO = re.compile(r"(://)[^\s?#]*@")
 SECRET_KEY = re.compile(
     r"pass|pwd|token|secret|credential|api[_-]?key|access[_-]?key", re.I)
 
-# Row status. The gate reads this column and nothing else.
+# Row status. Only the unresolved count of the gate comes from this column.
+# The gate also reads the note text (service JSON unread, portal search
+# failed, no item, several items) and the aprx column.
 OK = "ok"
 COPIED = "copied"              # data copied to the server, not registered
 NODATA = "no-datasource"       # this service type reads nothing
