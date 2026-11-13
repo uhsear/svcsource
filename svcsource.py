@@ -140,13 +140,16 @@ PASSWORD_FIELD = re.compile(
 # token=, secret=, apikey=, access_key=, password: and the like in a connection string, a URL query,
 # a log line or a JSON snippet inside a string: the key may end in a quote or
 # take a colon, white space may follow the separator, and the value is a
-# quoted string whole or runs to the next ; & quote or white space. A token is
-# a bearer credential while it lives. After a colon a password with a space in
-# it is masked to the first space only.
+# quoted string whole (a backslash escapes a quote) or runs to the next ; & quote
+# or white space. After = an unquoted value also runs through spaces to the next
+# ; & or line end, unless it is already ***. A token is a bearer credential
+# while it lives. After a colon a password with a space in it is masked to the
+# first space only.
 TOKEN_FIELD = re.compile(
     r"(\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY)"
-    r"\w*[\"']?\s*[=:]\s*)"
-    r"(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^;&\s\"']*)", re.I)
+    r"\w*[\"']?\s*(?:(=)|:)\s*)"
+    r"(?:\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|\*\*\*"
+    r"|[^;&\s\"']*(?(2)(?:[ \t]+[^;&\r\n\"']+)*))", re.I)
 # user:password@ in the authority of a URL.
 URL_USERINFO = re.compile(r"(://)[^\s?#]*@")
 # A key whose name says its value is a credential: everything below it is
@@ -3218,7 +3221,10 @@ def self_test():
           and redact('{"token": "abc 1"}') == '{"token": ***}'
           and redact('TOKEN="abc 123') == "TOKEN=***"
           and redact("TOKEN='abc 123") == "TOKEN=***"
-          and redact("https://h/x?token=T0K&f=json") == "https://h/x?token=***&f=json",
+          and redact("https://h/x?token=T0K&f=json") == "https://h/x?token=***&f=json"
+          and redact('TOKEN="abc\\" def"') == "TOKEN=***"
+          and redact("TOKEN='abc\\' def'") == "TOKEN=***"
+          and redact("token=a b") == "token=***",
           "a token or secret is masked after a space, inside quotes, after a "
           "colon and in JSON, not only up to the next space  <-- pinned "
           "defect")
