@@ -1175,6 +1175,33 @@ remembers, which is why somebody ran an inventory.
   reach this case.
 - `--self-test` writes temporary files under the system temp directory and removes them. It
   writes nothing in the repository.
+- A service whose own `portalProperties` list no item, run without `--portal`, gets a blank
+  `source_item_id` and no note, and the run can still exit 0 with PASS. The summary line
+  `portal item IDs: N present, M missing` is the only place that says so. An unfederated site
+  looks like this for every service, so the exit code does not treat it as a failure. Read that
+  line before you rely on the item IDs, or run with `--portal`.
+- When stdout is closed, the exit code and the message depend on the platform. On Linux Python
+  exits 120. On Windows, `--self-test | head -1` ended with an `OSError` traceback (Errno 22) and
+  exit 1. No self-test assertion exercises a closed stdout.
+- The CSV is not scanned for secrets. It stays free of credentials only because the connection
+  string is cut down to five keys. A password that a site puts in `dataset`, `source_document`,
+  `database` or `note` is written as it came.
+- The TLS default is pinned by reading the attributes of the SSL context that the tool builds. No
+  HTTPS handshake against a self-signed stub is run, so the certificate check itself is not
+  exercised end to end.
+- A `--recycle-with` CSV with rows shorter than its header is read without a complaint. Those rows
+  join the recycle check with blank fields. The tool prints no count of the sites or rows it
+  compared, so check the file yourself when it may have been cut short.
+- The temporary file under `--apply` has the fixed name `<out>.partial`. In a shared folder, another
+  user can plant a symlink at that name and the write follows it. Write `--out` into a folder that
+  only you can write to.
+- A bad path given to `--recycle-with` or `--aprx-dir` is printed as typed in the usage error. A
+  password typed into one of those flags by mistake appears in that line.
+- `pyflakes` was run on Windows only, and it is not installed on the Linux host. The module
+  compiles under `python -W error` on both.
+- The error-text mask can leave part of a password that holds both an apostrophe and a double quote
+  and appears in the `repr()` form, such as inside a printed dict. No call site in the tool builds
+  that text today.
 
 ## Contributing
 
