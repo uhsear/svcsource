@@ -159,8 +159,8 @@ PASS  a backslash-escaped JSON secret, a quote mark inside an unquoted value and
 PASS  a secret in JSON kept inside a string is masked whole with a backslash-quote, an escaped quote or three backslashes round it  <-- pinned defect
 PASS  = and : take any white space on either side and mask the same way, a value with spaces whole  <-- pinned defect
 PASS  a url password with a space is masked up to the last @ before a ? or #, and an @ in a query is left alone  <-- pinned defect
-PASS  an Authorization, Bearer or Basic credential is masked to the end of the line  <-- pinned defect
-PASS  a seeded random sweep of 2200 keys, quotes, backslash depths, separators and secret bodies never lets a secret through redact and a second pass changes nothing  <-- pinned defect
+PASS  an Authorization credential, or a bearer= key, is masked to the end of the line; Bearer in prose is not  <-- pinned defect
+PASS  a seeded random sweep of 2200 keys, quotes, backslash depths, separators and secret bodies never lets a secret through redact and a second pass changes nothing, and 500 ordinary GIS strings (layer names, service urls, prose with pass, basic and bearer words) come out unchanged  <-- pinned defect
 PASS  an API key or access key in a url, a connection string or JSON is masked like a token  <-- pinned defect
 PASS  a manifest key named for an API key or access key is masked whole, and one inside a string is masked too  <-- pinned defect
 PASS  a password in the userinfo of a url inside a manifest is masked in the dump file, and a url with none is kept  <-- pinned defect
@@ -364,12 +364,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-723 assertions, 0 failed
+726 assertions, 0 failed
 ```
 
 The block above is an excerpt of the real run, not the whole output. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 723 assertions in all. The count is 723 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 726 assertions in all. The count is 726 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -1013,11 +1013,11 @@ remembers, which is why somebody ran an inventory.
   escaping. A name that holds a double quote changes the query and gives a wrong or missing item
   ID. Such a name is rare.
 - The secret masks work on the text and on key names. `--dump-manifest` masks only fields and
-  keys whose names contain `pass`, `pwd`, `credential`, `token`, `secret`, `apikey`, `api_key`,
+  keys whose names contain `password`, `passwd`, `passphrase`, `pwd` or a whole-word `pass`, `credential`, `token`, `secret`, `apikey`, `api_key`,
   `access_key` (a hyphen also counts) or `accesskey`, and it masks the `user:password@` part of a
   url inside a string. So a password in a url query under another name, under a `PW=` field, or
-  under another credential name is written as the server sent it. An `Authorization:`, `Bearer` or `Basic` credential inside a string is masked to the end of the
-  line, but a manifest key named `authorization` is not masked whole. A key named `key`, `pw` or
+  under another credential name is written as the server sent it. An `Authorization:` credential, or a `bearer=` or `basic=` key, inside a string is masked to the end
+  of the line (`Bearer` and `Basic` as ordinary words are not), but a manifest key named `authorization` is not masked whole. A key named `key`, `pw` or
   `sig`, a `private_key=...`, an Azure-style `AccountKey=...` and a SAS `sig=` are written as sent as well. The text
   before the first `=` of an `AccountKey=KEY==` value stays, because the mask stops at the key
   name.
@@ -1079,7 +1079,12 @@ remembers, which is why somebody ran an inventory.
 - The secret redaction is a plain string replace. A password of one or two characters also blanks
   those characters elsewhere in an error message. Error text also has `user:pass@` in a URL and
   any `password=`, `token=`, `secret=` or `apikey=` value masked, whether or not the tool knew that
-  credential.
+  credential. A `user:password@` is found when the password holds no
+  white space, `?` or `#`. One that does is found when the part before its first `/` has a `:` that is not
+  a port, so a password that holds white space or `?` or `#` and also a `/`, or one of digits only followed by
+  a `/`, can be missed. A `:` before an `@` in a url path, as in `https://h:6443/x@y`, is not read as a password
+  because `host:port/` is not user information. A percent-encoded key (`token%3D...`) is masked to the end of
+  its value.
 - The token travels in the query string of every GET, as the Admin API accepts, so it can appear
   in web adaptor and proxy access logs. Use https, and treat those logs as sensitive.
 - The tool makes two Admin API calls per service, one for the service JSON and one for the

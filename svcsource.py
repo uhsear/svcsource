@@ -136,29 +136,39 @@ REDACTED = "***"
 # or the end. Stopping at the first semicolon left the tail of a password that
 # holds one.
 PASSWORD_FIELD = re.compile(
-    r"(\b\w*(?:PASS|PWD|CREDENTIAL)\w*\s*=).*?(?=;\s*\w+\s*=|$)",
+    r"(\b\w*(?:PASSWORD|PASSWD|PASSPHRASE|PASSCODE|PWD|CREDENTIAL)\w*\s*="
+    r"|\b(?:\w*[_.-])?PASS(?:[_.-]\w*)?\s*=).*?(?=;\s*\w+\s*=|$)",
     re.I | re.S)
 # A key that names a credential, in a connection string, a URL query, a log
 # line or JSON kept inside a string: password, token, secret, api key,
 # Authorization, and the words Bearer and Basic. The key may carry a quote
-# with any number of backslashes before it, and takes = or : with any white
-# space (non-breaking included) around it. TOKEN_FIELD matches the key and
-# the separator only; _value_end finds where the value stops. A token is a
-# bearer credential while it lives, so the rule is to mask too much.
+# with any number of backslashes before it (or a percent-encoded one), and
+# takes = or : (or %3D, %3A) with any white space around it. TOKEN_FIELD
+# matches the key and the separator only; _value_end finds where the value
+# stops. A token is a bearer credential while it lives, so the rule is to
+# mask too much, but not ordinary words: a bare PASS (also Bus Pass, compass,
+# passport, passed) is a key only before = or inside quotes, and Bearer or
+# Basic is a credential only after an Authorization header name or as a whole
+# key (bearer=, "bearer":), never as a prose word.
+_QUOTE = r"(?:\\*[\"']|%2[27])"
+_SEP = r"(?:\s|%20)*(?:[=:]|%3[AD])(?:\s|%20)*"
 TOKEN_FIELD = re.compile(
-    r"\b\w*(?:TOKEN|SECRET|PASS|PWD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY)"
-    r"\w*(?:\\*[\"'])?\s*[=:]\s*"
-    r"|\b(?P<line>(?:proxy-)?authorization\w*(?:\\*[\"'])?\s*[=:]\s*"
-    r"|(?:bearer|basic)(?:\\*[\"'])?(?:\s*[=:]\s*|\s+))", re.I)
+    r"\b\w*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PASSCODE|PWD|CREDENTIAL"
+    r"|API[_-]?KEY|ACCESS[_-]?KEY)\w*" + _QUOTE + "?" + _SEP
+    + r"|\b(?:\w*[_.-])?PASS(?:[_.-]\w*)?(?:(?:\s|%20)*=(?:\s|%20)*|"
+    + _QUOTE + _SEP + ")"
+    + r"|\b(?P<line>(?:proxy-)?authorization\w*" + _QUOTE + "?" + _SEP
+    + r"|(?:bearer|basic)(?:(?:\s|%20)*=(?:\s|%20)*|" + _QUOTE + _SEP + "))",
+    re.I)
 _QUOTED_VALUE = re.compile(r"(\\*)([\"'])")
-# user:password@ in the authority of a URL: everything after :// up to the
-# last @ before the first ? or #, spaces and slashes included, since a
-# password may hold either.
-URL_USERINFO = re.compile(r"(://)[^\r\n?#]*@")
+# user:password@ in the authority of a URL, scheme-relative // included. See
+# _mask_userinfo for the rules.
+_AUTHORITY = re.compile(r"(?:(?<=:)|(?<![^\s\"'=(\[,;]))//")
 # A key whose name says its value is a credential: everything below it is
 # masked.
 SECRET_KEY = re.compile(
-    r"pass|pwd|token|secret|credential|api[_-]?key|access[_-]?key", re.I)
+    r"pass(?:word|wd|phrase|code)|pwd|(?:^|[_.-])pass(?:$|[_.-])|token|secret"
+    r"|credential|api[_-]?key|access[_-]?key", re.I)
 
 # Row status. Only the unresolved count of the gate comes from this column.
 # The gate also reads the note text (service JSON unread, portal search
@@ -1590,10 +1600,61 @@ def mask_fields(text):
         pos = _value_end(text, found.end(), bool(found.group("line")))
 
 
+PORT = re.compile(r"[^:]*:\d+")
+
+
+def _mask_userinfo(text):
+    """text with the user:password before the @ of a URL replaced by ***.
+
+    The candidate is what follows // up to the first white space, ? or #. An
+    @ in it is user information only when a : comes before the last @ and
+    before the first /, and host:port/ does not count, so a path that holds
+    an @ (.../MapServer@2) or a mail address after a URL is left alone. A password that holds white space, ? or # ends the candidate
+    early: when its authority (up to the first /) holds a : that is not a
+    port, the first @ after it, and the last @ of that token before any ? or
+    #, closes the user information. shortcut: a password that holds white
+    space or ? or # and also a /, or an all-digit password followed by a /,
+    is not found.
+    """
+    out, pos = [], 0
+    for found in _AUTHORITY.finditer(text):
+        if found.start() < pos:
+            continue
+        start = found.end()
+        eol = start
+        while eol < len(text) and text[eol] not in "\r\n":
+            eol += 1
+        cut = start
+        while cut < eol and not text[cut].isspace() and text[cut] not in "?#":
+            cut += 1
+        at = text.rfind("@", start, cut)
+        if at >= 0:
+            authority = text[start:at].split("/")[0]
+            if ":" not in authority or (
+                    "/" in text[start:at] and PORT.fullmatch(authority)):
+                continue
+        else:
+            authority = text[start:cut].split("/")[0]
+            if (":" not in authority or cut == eol
+                    or PORT.fullmatch(authority)):
+                continue
+            first = text.find("@", cut, eol)
+            if first < 0:
+                continue
+            end = first + 1
+            while (end < eol and not text[end].isspace()
+                   and text[end] not in "?#"):
+                end += 1
+            at = text.rfind("@", first, end)
+        out.append(text[pos:start] + REDACTED + "@")
+        pos = at + 1
+    return "".join(out) + text[pos:]
+
+
 def scrub(text):
     """Mask userinfo, connection string passwords and credential fields."""
     return mask_fields(PASSWORD_FIELD.sub(
-        r"\1" + REDACTED, URL_USERINFO.sub(r"\1" + REDACTED + "@", text)))
+        r"\1" + REDACTED, _mask_userinfo(text)))
 
 
 def redact(text, *secrets):
@@ -3323,9 +3384,40 @@ def self_test():
           == "Authorization: ***\nnext"
           and redact('{"Authorization": "Bearer abc def", "n": 1}')
           == '{"Authorization": ***, "n": 1}'
-          and redact("got Bearer abc def") == "got Bearer ***",
-          "an Authorization, Bearer or Basic credential is masked to the "
-          "end of the line  <-- pinned defect")
+          and redact("got Bearer abc def") == "got Bearer abc def",
+          "an Authorization credential, or a bearer= key, is masked to the "
+          "end of the line; Bearer in prose is not  <-- pinned defect")
+    check(all(redact(t) == t and mask_passwords(t) == t for t in (
+        "Basic Parcels layer", "Bearer Rd", "Description: bearer of bad news",
+        "Basic: Parcel info", "Bus Pass: Zones", "Compass: N", "Passport: 3",
+        "PASS: every data source was read.", "passed: 12 failed: 0",
+        "Failed https://h/arcgis/rest/services/A/MapServer contact "
+        "admin@example.com for help",
+        "https://h/rest/services/x/MapServer@2",
+        "https://h:6443/arcgis contact admin@example.com")),
+          "Basic, Bearer, Pass, Compass and Passport in prose, and a url "
+          "with an @ in its path or a mail address after it, are not "
+          "masked  <-- pinned defect")
+    check(redact("Authorization: Basic abc") == "Authorization: ***"
+          and redact('"bearer": "abc"') == '"bearer": ***'
+          and redact("PASS=abc;x=1") == "PASS=***;x=1"
+          and redact('"pass": "abc"') == '"pass": ***'
+          and redact("db_pass=abc") == "db_pass=***"
+          and mask_passwords({"pass": "z", "compass": "N"})
+          == {"pass": "***", "compass": "N"},
+          "Bearer, Basic and PASS are still keys as a whole key  <-- pinned "
+          "defect")
+    check("MARK" not in redact("https://u:p?w MARK@h")
+          and "MARK" not in redact("https://u:p#w MARK@h/x")
+          and redact("https://u:p?w MARK@h/x") == "https://***@h/x"
+          and "MARK" not in redact("//u:MARK@h")
+          and "MARK" not in redact("token%3Dabc%20MARK")
+          and "MARK" not in redact("token%3AMARK")
+          and "MARK" not in redact("password%3Dabc%20MARK")
+          and "MARK" not in redact("x?%22token%22%3A%22MARK%22&f=json")
+          and redact("https://u:p w@host/x") == "https://***@host/x",
+          "a url password that holds ? # or a space, a scheme-relative "
+          "password and a percent-encoded key are masked  <-- pinned defect")
     rng = random.Random(20261113)
     fuzz_keys = ("token", "accessToken", "access_token", "password", "pwd",
                  "client_secret", "apikey", "api_key", "credential", "PassWd")
@@ -3343,9 +3435,8 @@ def self_test():
         fence = "\\" * depth + quote
         key_text = fence + key + fence if rng.random() < 0.6 else key
         sep = rng.choice(fuzz_seps)
-        if key == "bearer" and rng.random() < 0.3:
-            sep = " "
-            key_text = key
+        if key == "bearer" and key_text == key and "=" not in sep:
+            sep = "="
         quoted = rng.random() < 0.5 and sep != " "
         parts = [rng.choice(fuzz_pieces) for _ in range(rng.randint(0, 6))]
         if quoted:
@@ -3371,10 +3462,35 @@ def self_test():
             continue
         if mark in redact(text):
             fuzz_failures.append((text, redact(text)))
+    ordinary = ("Basic Parcels layer", "Bearer Rd", "Bus Pass: Zones",
+                "Compass: N", "Passport: 3", "bypass road", "Basic: Parcel",
+                "passed: 12 failed: 0", "Description: bearer of bad news",
+                "Pass Through Fees", "Bearer Creek Rd")
+    ordinary_urls = ("https://h/arcgis/rest/services/%s/MapServer",
+                     "https://h:6443/arcgis/rest/services/%s@2/FeatureServer",
+                     "https://h/arcgis/rest/services/a@%s/MapServer")
+    ordinary_prose = ("Failed %s contact admin@example.com for help",
+                      "see %s or mail ops@example.org", "%s: PASS ok",
+                      "%s has %d layers, passed %d", "layer %s Bearer %d")
+    for case in range(500):
+        word = rng.choice(ordinary)
+        url = rng.choice(ordinary_urls) % rng.choice(
+            ("Parcels", "Roads_%d" % case, "Basic", "Bearer", "Compass"))
+        text = rng.choice(ordinary_prose)
+        if text.count("%s") == 1 and "%d" not in text:
+            text = text % (url if "http" not in word else word)
+        elif "%d" in text:
+            text = text % ((word, case, case % 7) if text.count("%d") == 2
+                           else (word, case))
+        text = "%s %s" % (word, text) if case % 2 else text
+        if redact(text) != text or mask_passwords(text) != text:
+            fuzz_failures.append((text, redact(text)))
     check(not fuzz_failures,
           "a seeded random sweep of 2200 keys, quotes, backslash depths, "
           "separators and secret bodies never lets a secret through redact "
-          "and a second pass changes nothing  <-- pinned defect"
+          "and a second pass changes nothing, and 500 ordinary GIS strings "
+          "(layer names, service urls, prose with pass, basic and bearer "
+          "words) come out unchanged  <-- pinned defect"
           + (" first failure: %r" % (fuzz_failures[:1],)
              if fuzz_failures else ""))
     check(redact("https://h/x?apikey=KEY123&f=json")
