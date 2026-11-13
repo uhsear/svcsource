@@ -60,7 +60,9 @@ The password comes from SVCSOURCE_PASSWORD or an unechoed prompt, never from
 argv. Exit codes: 0 every service resolved, 1 at least one data source could
 not be read, 2 the site could not be read, 3 every source was read and at least
 one geocode service serves a copied locator, 4 every source was read and
---aprx-dir found a service that matches two or more projects, 64 usage error.
+--aprx-dir found a service that matches two or more projects, 5 every source
+was read and a service that can have a portal item has none and no --portal
+search was run, 64 usage error.
 """
 
 from __future__ import print_function
@@ -304,6 +306,20 @@ def has_userinfo(url):
     # @ in a path is refused with it, which is the safe direction.
     before_query = re.split(r"[?#]", url.split("://", 1)[-1], maxsplit=1)[0]
     return "@" in before_query
+
+
+def has_bad_port(url):
+    """True when the port of a url is not a number.
+
+    A password typed after the host and a colon, https://host:PASSWORD/arcgis,
+    is read as a port, and urllib quotes it back in its error. The url is
+    refused before anything uses it.
+    """
+    try:
+        urllib.parse.urlsplit(url).port
+    except ValueError:
+        return True
+    return False
 
 
 def service_path(folder, service, typ):
@@ -1237,6 +1253,24 @@ def match_aprx(document, service, typ, projects):
                           AMBIGUOUS_END))
 
 
+def unsearched_blank_item(row):
+    """True for a service that can have a portal item, has none in its own
+    record, and was never searched for one.
+
+    A blank item ID with none of the other notes is one no --portal search
+    answered for: a search that ran leaves an ID or a PORTAL_ or JSON_UNREAD
+    note. A type with no portal item type, or one that reads no data, is not
+    expected to have an item.
+    """
+    typ = row.get("type", "")
+    if (row.get("source_item_id") or typ not in TYPE_TO_PORTAL_TYPE
+            or typ in NO_DATASOURCE_TYPES):
+        return False
+    note = row.get("note", "")
+    return not any(n in note for n in
+                   (JSON_UNREAD, PORTAL_FAILED, PORTAL_NO_ITEM, PORTAL_MANY))
+
+
 def summarize(rows, unsettled=0):
     """Counts the summary prints and the gate reads.
 
@@ -1289,6 +1323,7 @@ def summarize(rows, unsettled=0):
                            if PORTAL_NO_ITEM in r.get("note", "")],
         "portal_many": [r for r in services
                         if PORTAL_MANY in r.get("note", "")],
+        "no_item_id": [r for r in services if unsearched_blank_item(r)],
         "locator_unsettled": unsettled,
         "aprx_paired": len(paired),
         "aprx_ambiguous": [r for r in services if r.get("aprx") == AMBIGUOUS],
@@ -1362,6 +1397,16 @@ def describe(summary, sample=10):
         if len(summary["portal_no_item"]) > sample:
             out.append("  ...and %d more" % (len(summary["portal_no_item"])
                                               - sample))
+    if summary["no_item_id"]:
+        out.append("")
+        out.append("no portal item ID in the service record, and no --portal "
+                   "search was run: %d. The tool cannot say whether an item "
+                   "exists for them." % len(summary["no_item_id"]))
+        for row in summary["no_item_id"][:sample]:
+            out.append("  %s" % row.get("path", ""))
+        if len(summary["no_item_id"]) > sample:
+            out.append("  ...and %d more" % (len(summary["no_item_id"])
+                                              - sample))
     if summary["portal_many"]:
         out.append("")
         out.append("portal search found several items: %d. Their item IDs "
@@ -1410,7 +1455,8 @@ def exit_code(summary):
     answer was not settled, or a --portal search found no item, or
     --aprx-dir paired no service at all, else 4 when --aprx-dir found a
     service that two projects match, else 3 when a geocode service serves a
-    copied locator, else 0.
+    copied locator, else 5 when a service that can have a portal item has
+    none in its own record and no --portal search was run, else 0.
 
     AMBIGUOUS is a refusal: the pairing a republish needs was not made, so
     it outranks the copied locator, which is a finding about a pairing that
@@ -1429,7 +1475,9 @@ def exit_code(summary):
         return 1
     if summary["aprx_ambiguous"]:
         return 4
-    return 3 if summary["copied_locators"] else 0
+    if summary["copied_locators"]:
+        return 3
+    return 5 if summary["no_item_id"] else 0
 
 
 def verdict_line(summary):
@@ -1473,6 +1521,11 @@ def verdict_line(summary):
                 "service(s) serve a locator copied to the server. A rebuild "
                 "of the source locator does not reach them."
                 % summary["copied_locators"])
+    if code == 5:
+        return ("NO ITEM IDS: every data source was read, and %d service(s) "
+                "have no portal item ID in their own record. No --portal "
+                "search was run, so the tool cannot say whether an item "
+                "exists." % len(summary["no_item_id"]))
     if summary["copied"]:
         return ("PASS: every data source was read. %d service(s) read data "
                 "copied to the server." % summary["copied"])
@@ -1892,8 +1945,8 @@ def mask_passwords(value, secret=False):
     if secret:
         return REDACTED
     if isinstance(value, str):
-        return TOKEN_FIELD.sub(r"\1" + REDACTED,
-                               PASSWORD_FIELD.sub(r"\1" + REDACTED, value))
+        return TOKEN_FIELD.sub(r"\1" + REDACTED, PASSWORD_FIELD.sub(
+            r"\1" + REDACTED, URL_USERINFO.sub(r"\1" + REDACTED + "@", value)))
     return value
 
 
@@ -2973,7 +3026,7 @@ def self_test():
                         "onServerConnectionString":
                             "DATABASE=gisdb;INSTANCE=sde:sqlserver:H",
                         "datasets": [{"onServerName": "pts"}]}]},
-        folders=reg))
+        folders=reg, portal_item_id="9" * 32))
     check((mixed["copied_locators"], mixed["copied"]) == (0, 1)
           and exit_code(mixed) == 0,
           "a geocode service reading its locator in place and a copied "
@@ -2995,6 +3048,10 @@ def self_test():
                  + rows_for_service(geom, {}, None)
                  + rows_for_service({"folder": "", "service": "Managed",
                                      "type": "FeatureServer"}, {}, copied))
+    found = "9" * 32
+
+    def itemed(rows):
+        return [dict(r, source_item_id=found) for r in rows]
     summary = summarize(site_rows)
     check(summary["services"] == 5,
           "the summary counts services, not rows  <-- pinned defect")
@@ -3012,13 +3069,13 @@ def self_test():
           "one unreadable data source fails the run  <-- pinned defect")
     check(verdict_line(summary).startswith("FAIL:"),
           "and the last line says FAIL")
-    check(verdict_line(summarize(site_rows[-1:])) == "PASS: every data source "
-          "was read. 1 service(s) read data copied to the server.",
+    check(verdict_line(summarize(itemed(site_rows[-1:]))) == "PASS: every "
+          "data source was read. 1 service(s) read data copied to the server.",
           "a pass with copied data names the copies on the PASS line")
     check(verdict_line(summarize([])) == "PASS: every data source was read.",
           "a pass with nothing copied says only PASS")
-    check(exit_code(summarize([r for r in site_rows
-                               if r["service"] != "Cached"])) == 0,
+    check(exit_code(summarize(itemed([r for r in site_rows
+                                      if r["service"] != "Cached"]))) == 0,
           "a site whose every data source was read passes")
     check(exit_code(summarize([])) == 0,
           "a site with no services at all passes, it has nothing unresolved")
@@ -3086,7 +3143,8 @@ def self_test():
     unresolved_many = []
     for i in range(12):
         unresolved_many.extend(rows_for_service(
-            {"folder": "", "service": "U%d" % i, "type": "MapServer"}, {}, None))
+            {"folder": "", "service": "U%d" % i, "type": "MapServer"}, {}, None,
+            portal_item_id="9" * 32))
     lines = describe(summarize(unresolved_many))
     check(lines.count("  ...and 2 more") == 1,
           "the unresolved list is sampled the same way")
@@ -3181,6 +3239,14 @@ def self_test():
                                                  "apikey=KEY9&f=json"}}),
           "a manifest key named for an API key or access key is masked "
           "whole, and one inside a string is masked too  <-- pinned defect")
+    userinfo = manifest_text({"a": {"onServerConnectionString":
+                                    "https://sde:Pa55w0rd@host/arcgis"},
+                              "b": ["ftp://u:Sw0rdf1sh@h/x", "https://h/ok"]})
+    check("Pa55w0rd" not in userinfo and "Sw0rdf1sh" not in userinfo
+          and "https://***@host/arcgis" in userinfo
+          and "https://h/ok" in userinfo,
+          "a password in the userinfo of a url inside a manifest is masked "
+          "in the dump file, and a url with none is kept  <-- pinned defect")
 
     # ---- the site, answered in process. No socket is opened and no credential
     # is real. _opener is swapped for a stand-in that answers the paths an
@@ -3958,6 +4024,41 @@ def self_test():
           and exit_code(summarize(hand)) == 0,
           "a service type with no portal item type is not searched, so it "
           "is not a miss")
+    unsearched = serving(
+        site(services=bare, manifests=bare_manifest),
+        lambda: inventory(json_getter("TESTTOKEN"), ROOT, [noitem]))
+    us = summarize(unsearched)
+    check(unsearched[0]["source_item_id"] == "" and len(us["no_item_id"]) == 1
+          and exit_code(us) == 5
+          and verdict_line(us).startswith("NO ITEM IDS: every data source "
+                                          "was read, and 1 service(s) have "
+                                          "no portal item ID")
+          and "PASS" not in verdict_line(us),
+          "a service with no item ID in its own record and no --portal "
+          "search exits 5 and does not say PASS  <-- pinned defect")
+    check(any(l.startswith("no portal item ID in the service record") for l
+              in describe(us)) and "  X.MapServer" in describe(us),
+          "and the summary names the service")
+    many_us = summarize(unsearched)
+    many_us["no_item_id"] = [unsearched[0]] * 12
+    check(describe(many_us)[-1] == "  ...and 2 more",
+          "more than ten such services are cut with a count")
+    check(exit_code(dict(us, copied_locators=1)) == 3
+          and exit_code(dict(us, aprx_ambiguous=[1])) == 4
+          and exit_code(dict(us, unresolved=[1])) == 1,
+          "a copied locator, an AMBIGUOUS project and an unread source all "
+          "outrank the missing item ID")
+    check(exit_code(summarize([dict(unsearched[0], source_item_id="9" * 32)]))
+          == 0 and summarize(rows_for_service(
+              {"folder": "", "service": "G", "type": "GeometryServer"}, {},
+              None))["no_item_id"] == [],
+          "a service with an item ID, and a geometry service that reads no "
+          "data, are not counted as missing one")
+    check(summarize(rows_for_service(noitem, None, None))["no_item_id"] == []
+          and summarize(rows_for_service(
+              noitem, {}, None, portal_item_id=False))["no_item_id"] == [],
+          "a service whose JSON was unread, or whose --portal search found "
+          "no item, is reported by its own line and not counted twice")
     rows = serving(site(services=bare, manifests=bare_manifest),
                    lambda: inventory(
         json_getter("TESTTOKEN"), ROOT, [noitem],
@@ -4275,6 +4376,20 @@ def self_test():
     # turned this assertion red.
     check(not os.path.exists(unwritten),
           "and no file appears where --out points  <-- pinned defect")
+    bare_site = site(
+        folders={"": {"folders": [], "services": [
+            {"serviceName": "X", "type": "MapServer"}]}},
+        services=bare, manifests=bare_manifest)
+    bare_out = os.path.join(tmp, "bare.csv")
+    code, text = serving(bare_site, lambda: run(
+        ["--server", ROOT, "--user", "gis_admin", "--out", bare_out,
+         "--apply"]))
+    check(code == 5 and "portal item IDs: 0 present, 1 missing" in text
+          and "NO ITEM IDS:" in text and "PASS" not in text
+          and os.path.isfile(bare_out),
+          "the command line exits 5 for a service with no item ID and no "
+          "--portal search, says so on the last line, and still writes the "
+          "inventory  <-- pinned defect")
 
     applied = os.path.join(tmp, "applied.csv")
     code, text = serving(site(), lambda: run(["--server", ROOT, "--user",
@@ -4287,7 +4402,8 @@ def self_test():
     with io.open(applied, encoding="utf-8") as handle:
         applied_text = handle.read()
     check("hunter2" not in applied_text and "TESTTOKEN" not in applied_text,
-          "no credential reaches the file on disk  <-- pinned defect")
+          "neither the password nor the token the test used reaches the "
+          "file on disk  <-- pinned defect")
 
     dumped = os.path.join(tmp, "raw-manifests.json")
     code, text = serving(site(), lambda: run(
@@ -4356,6 +4472,25 @@ def self_test():
               "a %s url with user:password@ is refused with 64 before any "
               "call, and the password is not echoed  <-- pinned defect"
               % flag)
+    for flag, given in (("--server", "https://gis.example.com:PWPORT4/arcgis"),
+                        ("--portal", "https://portal.example.com:PWPORT5/portal"),
+                        ("--server", "https://gis.example.com:99999/arcgis")):
+        argv = ["--server", given if flag == "--server" else ROOT,
+                "--user", "gis_admin", "--insecure", "--apply",
+                "--out", os.path.join(tmp, "badport.csv")]
+        if flag == "--portal":
+            argv += ["--portal", given, "--public-rest-root", REST_ROOT]
+        code, text = serving(site(), lambda: run(argv))
+        check(code == 64 and "PWPORT" not in text and "99999" not in text
+              and "port that is not a number" in text
+              and not os.path.exists(os.path.join(tmp, "badport.csv")),
+              "a %s url with a password in the port position is refused with "
+              "64 before any call, and the password is not echoed  "
+              "<-- pinned defect" % flag)
+    check(not has_bad_port("https://h:6443/arcgis")
+          and not has_bad_port("https://h/arcgis")
+          and has_bad_port("https://h:abc/arcgis"),
+          "a numeric port, and none, are not refused")
     check(not has_userinfo("https://h/arcgis?email=a@b.example")
           and not has_userinfo("https://h:6443/arcgis#x@y")
           and has_userinfo("https://adm:Pa/ss9@h/arcgis")
@@ -4745,7 +4880,8 @@ def self_test():
         wire_text = handle.read()
     check("hunter2" not in wire_text and "TESTTOKEN" not in wire_text
           and "hunter2" not in text and "TESTTOKEN" not in text,
-          "no credential reaches the file or the console  <-- pinned defect")
+          "neither the password nor the token the test used reaches the "
+          "file or the console  <-- pinned defect")
     wire_rows = dict((r["service"], r) for r in read_back(wire_csv)[0])
     check(wire_rows["Address"]["status"] == COPIED
           and wire_rows["Streets"]["status"] == UNRESOLVED,
@@ -5163,6 +5299,7 @@ def self_test():
                 "resources": [{"onPremisePath": document}]}
     amb = rows_for_service({"service": "Roads", "type": "MapServer"}, {},
                            with_db("C:\\m\\Roads.aprx"),
+                           portal_item_id="9" * 32,
                            projects=["D:\\a; b\\Roads.aprx",
                                      "D:\\c\\Roads.aprx"])
     amb_summary = summarize(amb)
@@ -5181,10 +5318,12 @@ def self_test():
     check(describe(many_amb)[-1] == "  ...and 2 more",
           "more than ten AMBIGUOUS services are cut with a count")
     nf = rows_for_service({"service": "Roads", "type": "MapServer"}, {},
-                          with_db("C:\\m\\Roads.aprx"), projects=[])
+                          with_db("C:\\m\\Roads.aprx"), projects=[],
+                          portal_item_id="9" * 32)
     paired_row = rows_for_service(
         {"service": "Parcels", "type": "MapServer"}, {},
-        with_db("C:\\m\\parcels.aprx"), projects=["D:\\a\\Parcels.aprx"])
+        with_db("C:\\m\\parcels.aprx"), projects=["D:\\a\\Parcels.aprx"],
+        portal_item_id="9" * 32)
     check(summarize(nf + paired_row)["aprx_missing"] == 1
           and summarize(nf + paired_row)["aprx_paired"] == 1
           and "projects: 1 paired, 0 AMBIGUOUS, 1 not found"
@@ -5856,6 +5995,11 @@ def main(argv=None):
             print("error: %s must not carry a user name or password in its "
                   "address. Give the user name as --user and the password in "
                   "%s." % (flag, SECRET_ENV), file=sys.stderr)
+            return 64
+        if has_bad_port(url):
+            print("error: %s has a port that is not a number. The value is "
+                  "not shown, in case it holds a password." % flag,
+                  file=sys.stderr)
             return 64
         if url.lower().startswith("http://"):
             # Plain http sends the password and then the token unencrypted,

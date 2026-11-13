@@ -157,6 +157,7 @@ PASS  a colon form, a JSON snippet in a string, PASSWD=, PASS=, CREDENTIAL= and 
 PASS  a token or secret is masked after a space, inside quotes, after a colon and in JSON, not only up to the next space  <-- pinned defect
 PASS  an API key or access key in a url, a connection string or JSON is masked like a token  <-- pinned defect
 PASS  a manifest key named for an API key or access key is masked whole, and one inside a string is masked too  <-- pinned defect
+PASS  a password in the userinfo of a url inside a manifest is masked in the dump file, and a url with none is kept  <-- pinned defect
 PASS  the default opener verifies the certificate against the system trust store  <-- pinned defect
 ...
 PASS  the password is posted, never put in the url  <-- pinned defect
@@ -198,6 +199,7 @@ PASS  a portal that lists fewer hits than its total is several, and a single hit
 PASS  a hit that names another url is not this service  <-- pinned defect
 ...
 PASS  a portal search that failed marks the row, fails the run and says so, rather than reading as a service with no item  <-- pinned defect
+PASS  a service with no item ID in its own record and no --portal search exits 5 and does not say PASS  <-- pinned defect
 ...
 PASS  several portal items blank the item ID, fail the run and say so, rather than a PASS with one arbitrary ID  <-- pinned defect
 PASS  a service that knows its own item ID is not searched for
@@ -232,8 +234,9 @@ PASS  an unknown flag is not quoted back, and the error says where the password 
 PASS  a quoted value in any other usage error is masked
 ...
 PASS  --out without --apply writes nothing and says so  <-- pinned defect
+PASS  the command line exits 5 for a service with no item ID and no --portal search, says so on the last line, and still writes the inventory  <-- pinned defect
 ...
-PASS  no credential reaches the file on disk  <-- pinned defect
+PASS  neither the password nor the token the test used reaches the file on disk  <-- pinned defect
 ...
 PASS  a service name with an escape sequence is printed as sent, which the README Limits say
 ...
@@ -241,6 +244,8 @@ PASS  a credential in the --server url is not echoed in the error line  <-- pinn
 PASS  a --server url with user:password@ is refused with 64 before any call, and the password is not echoed  <-- pinned defect
 ...
 PASS  a --portal url with user:password@ is refused with 64 before any call, and the password is not echoed  <-- pinned defect
+PASS  a --server url with a password in the port position is refused with 64 before any call, and the password is not echoed  <-- pinned defect
+PASS  a --portal url with a password in the port position is refused with 64 before any call, and the password is not echoed  <-- pinned defect
 PASS  an @ before the first ? or # counts as user information, so a password holding a / is refused too; one in the query or the fragment does not  <-- pinned defect
 PASS  a bad scheme does not echo the password beside it  <-- pinned defect
 PASS  a catalog that cannot be read exits 2, not the gate's 1  <-- pinned defect
@@ -268,7 +273,7 @@ PASS  over a real socket the run reads the whole site and exits 1 for the locato
 PASS  and still reports the copied locator
 PASS  the password travels in the POST body, never in a url
 PASS  the registered folders are asked for once over the wire
-PASS  no credential reaches the file or the console  <-- pinned defect
+PASS  neither the password nor the token the test used reaches the file or the console  <-- pinned defect
 PASS  the file says which locator is the copy and which is UNKNOWN
 PASS  a folder search refused over the wire exits 1 with UNKNOWN and says why  <-- pinned defect
 PASS  an HTTP 500 from a real server raises with the token redacted  <-- pinned defect
@@ -353,12 +358,12 @@ PASS  the harness records a false check, a missing exception and two wrong excep
 PASS  a failed assertion turns the footer red, names it and exits 1  <-- pinned defect
 PASS  importing the module defines main and runs nothing
 ----------------------------------------------------------------------
-705 assertions, 0 failed
+717 assertions, 0 failed
 ```
 
 The block above is an excerpt of the real run, not the whole output. Each `...` line stands for omitted `PASS` lines, every line shown is
 verbatim from a fresh run in the same order, and the footer is the count of the whole run. A run
-prints 705 assertions in all. The count is 705 on Windows with Python 3.13, 3.12 and 3.9, and on
+prints 717 assertions in all. The count is 717 on Windows with Python 3.13, 3.12 and 3.9, and on
 Linux with Python 3.12. Python 3.9 was not run on Linux. Every run prints the same lines.
 
 ## Requirements
@@ -399,9 +404,9 @@ python -m coverage report -m
 ```
 Name           Stmts   Miss Branch BrPart  Cover   Missing
 ----------------------------------------------------------
-svcsource.py    2405      0    540      0   100%
+svcsource.py    2457      0    558      0   100%
 ----------------------------------------------------------
-TOTAL           2405      0    540      0   100%
+TOTAL           2457      0    558      0   100%
 ```
 
 ## Usage
@@ -420,7 +425,9 @@ python svcsource.py --server https://gis.example.com/arcgis --user gis_admin \
     --out services.csv --apply
 ```
 
-Services published outside the portal have no item ID in their own record. The portal can be asked
+Services published outside the portal have no item ID in their own record. Without `--portal`, a
+service of a type that can have a portal item and has none exits 5, and the last line says
+`NO ITEM IDS`, so a job does not read a blank item ID as a clean pass. The portal can be asked
 instead, by the url it recorded on the item:
 
 ```
@@ -471,7 +478,8 @@ error says that an argument was not recognised and does not print it, and any qu
 another usage error is shown as `'***'`, including a value that holds an apostrophe, which argparse
 quotes with double quotes. A `--server` or `--portal` address with an `@` before its first `?` or `#`
 is refused with exit 64 before any call. That covers `user:password@`, also when the password holds
-a `/`. urllib cannot open such an address, and
+a `/`. So is an address whose port is not a number, such as `https://host:PASSWORD/arcgis`, which
+urllib quotes back in its error. urllib cannot open a `user:password@` address, and
 through an http proxy it can, which would put the password in the site name that the summary
 prints.
 
@@ -525,7 +533,8 @@ COPIED LOCATORS: every data source was read, and 1 geocode service(s) serve a lo
 The run exits 3. A copied locator is not an unread source, so it is not the gate's 1, but a
 scheduled job that reads only the exit code still sees it. The last line says the same thing, so
 it never says PASS over a copied locator. A service that copied ordinary data to the server is
-different: the run still exits 0, and the last line says PASS and counts those services.
+different: the run still exits 0, and the last line says PASS and counts those services, when
+every service that can have a portal item has one.
 
 These are the two geocode rows the same run wrote with `--apply`:
 
@@ -812,9 +821,8 @@ whether your site's geocode manifests list the locator under `databases`.
 
 ArcGIS Server Manager shows a service's data source on the service's own page, and it is accurate.
 Pro shows it too, in the Share pane and in Analyze, because publishing is what builds the manifest
-in the first place. The ArcGIS API for Python reads the service catalog in two lines with
-`server.services.list()` and each service's properties beside it, which is the right tool for
-reading one site interactively.
+in the first place. The ArcGIS API for Python reads the service catalog with
+`server.services.list()`, which is the right tool for reading one site interactively.
 
 For locators, Pro's analyzer warns at publish time that data which is not registered with the
 server will be copied, and Manager lists the registered folders under the site's data stores. Both
@@ -869,14 +877,15 @@ reports the ID matching the service's own type and lists all of them in the colu
 
 | Code | Meaning |
 |---|---|
-| 0 | Every data source was read, and no geocode service serves a copied locator. |
+| 0 | Every data source was read, no geocode service serves a copied locator, and every service that can have a portal item has one. |
 | 1 | A data source or a service's own JSON could not be read, a `--portal` search did not answer or found no item, a `--locator` target could not be settled, or `--aprx-dir` paired no service at all and found no ambiguity. The inventory is incomplete. |
-| 2 | The site could not be read, a local input (`--recycle-with`, `--aprx-dir`) could not be read, or a file could not be written. No inventory is given. |
+| 2 | The site could not be read, a local input (`--recycle-with`, `--aprx-dir`) exists but could not be read, or a file could not be written. No inventory is given. A path that does not exist is a usage error, code 64. |
 | 3 | Every data source was read, and at least one geocode service serves a copied locator. |
 | 4 | Every data source was read, and `--aprx-dir` found a service that two or more projects match. |
+| 5 | Every data source was read, and a service of a type that can have a portal item has none in its own record, and no `--portal` search was run. |
 | 64 | Usage error. |
 
-When one run has several findings, the order is 2, then 1, then 4, then 3. An unread source wins,
+When one run has several findings, the order is 2, then 1, then 4, then 3, then 5. An unread source wins,
 because the inventory is then incomplete. A refused pairing outranks a copied locator, because the
 pairing a republish needs was not made. A site that cannot be read exits 2 and prints no inventory
 at all. A partial inventory is worse than none: the services it missed are exactly the ones nobody
@@ -999,9 +1008,9 @@ remembers, which is why somebody ran an inventory.
   ID. Such a name is rare.
 - The secret masks work on the text and on key names. `--dump-manifest` masks only fields and
   keys whose names contain `pass`, `pwd`, `credential`, `token`, `secret`, `apikey`, `api_key`,
-  `access_key` (a hyphen also counts) or `accesskey`, so a password in a
-  URL, under a `PW=` field, or under another credential name is written as the server sent
-  it. A `Bearer ...` string is written as sent too. A key named `key`, `pw`, `authorization` or
+  `access_key` (a hyphen also counts) or `accesskey`, and it masks the `user:password@` part of a
+  url inside a string. So a password in a url query under another name, under a `PW=` field, or
+  under another credential name is written as the server sent it. A `Bearer ...` string is written as sent too. A key named `key`, `pw`, `authorization` or
   `sig`, a `private_key=...`, an Azure-style `AccountKey=...` and a SAS `sig=` are written as sent as well. The text
   before the first `=` of an `AccountKey=KEY==` value stays, because the mask stops at the key
   name.
@@ -1158,15 +1167,26 @@ remembers, which is why somebody ran an inventory.
   the mask blanks `<urlopen`. No credential shows, and the exit code is 2 with no file written.
 - The instance-string forms for SQL Server and Oracle (`HOST\INSTANCE`, `HOST,port` and Oracle Easy
   Connect) are read from observed connection strings, and no vendor page is cited for them.
-- A `--recycle-with` CSV that has the right header and no `recycle_start` values still prints the
-  "recycle skew: no geodatabase has services from two sites" line. Nothing was compared, and the
-  line reads as a clean comparison. The recycle result is not part of the exit code.
+- A `--recycle-with` file with a header and no rows, or whose rows have no server, prints the
+  no-risk skew line although nothing was compared. When its rows carry a server and no
+  `recycle_start`, a second line counts the services that were not compared. The recycle result is
+  not part of the exit code.
+- A `--recycle-with` or `--aprx-dir` path that is missing is a usage error with exit 64. One that
+  exists but cannot be read exits 2.
+- The CSV is UTF-8 without a byte-order mark. Import it into a spreadsheet as UTF-8 if names hold
+  non-ASCII letters.
+- Eleven self-test assertions of the first published version (commit 8285f8d, 602 assertions) are
+  gone, because the behaviour they pinned changed in later review rounds: which folders are
+  walked, a failed portal search (now exit 1, not a blank ID), an unmatched project, and the
+  folder skip list. Each has a replacement. Two credential labels were reworded, not removed.
+- The self-test removes its temporary directory only when it runs to the end. An exception inside
+  it leaves a `svcsource-selftest-*` folder under the system temp directory.
 - Under `--apply`, an exit 1 run (unread sources) still replaces the last good `--out` file with
   the incomplete inventory. Only exit 2 leaves the old file untouched. Keep a copy of the earlier
   file.
 - A per-service JSON answer of `{}` is a valid object with no `serviceName`. It is read as a
   service with no portal item and no note, so a degenerate proxy answer gives a quiet row, not
-  "service JSON could not be read".
+  "service JSON could not be read". Without `--portal` the run then exits 5 for that service.
 - A portal item search hit that has no `url` field is kept. With a service name that changes the
   query, such a hit could be reported as the source item ID. ArcGIS Server service names cannot
   hold a quote, so this is rare.
@@ -1176,10 +1196,11 @@ remembers, which is why somebody ran an inventory.
 - `--self-test` writes temporary files under the system temp directory and removes them. It
   writes nothing in the repository.
 - A service whose own `portalProperties` list no item, run without `--portal`, gets a blank
-  `source_item_id` and no note, and the run can still exit 0 with PASS. The summary line
-  `portal item IDs: N present, M missing` is the only place that says so. An unfederated site
-  looks like this for every service, so the exit code does not treat it as a failure. Read that
-  line before you rely on the item IDs, or run with `--portal`.
+  `source_item_id` and no note in its row. The run exits 5, the last line says `NO ITEM IDS`, and
+  the summary lists the service. An unfederated site looks like this for every service, so it
+  always exits 5 without `--portal`; with `--portal` a service the search does not find exits 1.
+  A `GeometryServer`, and a service type with no portal item type, are not counted. A service
+  type with no portal item and a `--portal` search that answers is the existing exit 1.
 - When stdout is closed, the exit code and the message depend on the platform. On Linux Python
   exits 120. On Windows, `--self-test | head -1` ended with an `OSError` traceback (Errno 22) and
   exit 1. No self-test assertion exercises a closed stdout.
